@@ -653,6 +653,38 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
     .await
     .unwrap();
   assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
+  // The rows say which thread was imported, and from where; not its fork.
+  for (t, imported) in [(&i.thread, true), (&f, false)] {
+    let Reply::Lines(l) = c
+      .request(&Request::Threads {
+        forest: None,
+        status: None,
+        since: None,
+        limit: None,
+        thread: Some(t.clone()),
+        place: None,
+      })
+      .await
+      .unwrap()
+    else {
+      panic!("no rows")
+    };
+    let v: Value = serde_json::from_str(&l[0]).unwrap();
+    let row = v["threads"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|r| r["id"] == json!(t))
+      .unwrap_or_else(|| panic!("{t}: {v}"))
+      .clone();
+    if imported {
+      assert_eq!(row["imported_from"], json!(i.hash), "{row}");
+      assert_eq!(row["imported_source"], json!(i.signer.clone().unwrap()));
+      assert_eq!(row["imported_signed"], json!(true));
+    } else {
+      assert!(row.get("imported_from").is_none(), "{row}");
+    }
+  }
   // Of its last messages only: the import's note is not among them, so a
   // fence stands before the shared messages.
   let g = fork(&mut c, &i.thread, Some(4)).await;

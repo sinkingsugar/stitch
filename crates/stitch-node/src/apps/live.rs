@@ -632,6 +632,12 @@ pub(crate) fn threads(
         row["participants"] = Value::Array(crate::rooms::participants(&index, &r.id));
         row["room_mode"] = json!(crate::rooms::policy(&index, &r.id).mode);
       }
+      // Imported from a shared file (design §2.31): absent otherwise.
+      if let Some(o) = crate::share::origin(&index, &r.id) {
+        row["imported_from"] = json!(o.from);
+        row["imported_source"] = json!(o.source);
+        row["imported_signed"] = json!(o.signed);
+      }
     }
     out.push(row);
   }

@@ -1129,6 +1129,7 @@ Decided 2026-11-14, asked by the user ("the decision model reused for many thing
   - `share_preview(thread, effort, level) -> SharePreview` and `share_export(thread, effort, level, confirm) -> SharePreview` (its `path`), with `ShareFinding` `{kind, text, count, at}`;
   - `import_preview(path) -> ImportedThread` and `import_thread(path) -> ImportedThread`.
 - **Limits:** an attachment at most 10 MB, an app version 20 MB, all blobs 40 MB, a text attachment redacted and scanned up to 1 MB (larger is not shared). A blob not on this device is not shared, said in the message and in `left_out`. Images a tool showed (its result's `blobs`) are not shared.
+- **Thread rows** say an imported conversation (2026-11-23, asked by the user for the app): `Request::Threads`' JSON rows (and so the web client's `ThreadRow`) carry `imported_from` (the manifest's hash), `imported_source` (the sender's share key) and `imported_signed`, absent on other rows; the FFI's `ThreadInfo` has `imported_from`, `imported_source` (both `None` otherwise) and `imported_signed`. Read from the chain's imported thread (`share::origin`), so its compactions carry them; a fork of it does not (it is the user's). JSON rows only: `api.rs` and the protocol number did not change.
 - **Transcripts unchanged:** the notes are `room-note` events, and the model's note is hidden by `chat::unshown`. Imported user messages show as the user's bubbles in the web client and the app (their `from` is `shared:user`); a client may mark them, later. `folders::tree_blobs` lists an app's trees and files for the archive.
 - **Tested:**
   - Unit tests in `share.rs`: the scan finds each kind and leaves look-alikes alone; folding; file names; what counts as compressed. An archive opens as it was made: its entries, a viewer with no script (an escaped `<script>` in a message), images from `blobs/`, a PNG stored uncompressed, the signer and source. A changed transcript, viewer, manifest or blob is refused, and so are an entry added and an entry removed. A newer format is refused, saying why.
@@ -1143,7 +1144,7 @@ Decided 2026-11-14, asked by the user ("the decision model reused for many thing
     - An effort of two threads exported and imported, the second `imported-under` the first, which an `effort:` scope resolves to both.
 - **Left for the app** (another repository):
   - the exported type `.stitch` conforming to `public.zip-archive`, and opening a file into `import_preview`, then `import_thread` once the user agrees;
-  - continuing an imported thread through the existing `fork` (FFI, unchanged), offered prominently on an imported thread (told by its ⇩ title and the import's note first in its transcript: the thread rows do not carry `imported_from` yet);
+  - continuing an imported thread through the existing `fork` (FFI, unchanged), offered prominently on an imported thread (its row's `imported_from`, below);
   - a share action showing `share_preview`'s findings before `share_export`, then the share sheet with its `path`;
   - marking imported threads and their untaint.
 - **Not built:** the web client's and the TUI's share and import (the requests are there); scrubbing findings; showing which of the user's own nodes signed a file (only "this node" is told).

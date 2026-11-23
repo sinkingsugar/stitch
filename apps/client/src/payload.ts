@@ -48,6 +48,12 @@ export interface ThreadRow {
   /** A room's participants, as `RoomInfo` lists them. */
   participants?: RoomParticipant[];
   room_mode?: "sequential" | "parallel";
+  /** Imported from a shared file (design §2.31): the manifest's hash, the
+   * sender's share key, whether it signed it. Absent on the user's own
+   * threads (forks of imported ones included). */
+  imported_from?: string;
+  imported_source?: string;
+  imported_signed?: boolean;
 }
 
 /** One of a room's participants (`rooms::participants`): its `@slug`, how

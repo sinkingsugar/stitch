@@ -1708,6 +1708,32 @@ pub(crate) fn forked(s: &Shared, from: &RecordId, to: &RecordId) -> Result<()> {
   Ok(())
 }
 
+/// Where an imported conversation came from (design §2.31), for thread
+/// rows: the manifest's hash, its source key, and whether that key signed
+/// it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Origin {
+  pub from: String,
+  pub source: String,
+  pub signed: bool,
+}
+
+/// `thread`'s origin when it was imported: from its record, or from the
+/// thread of its compaction chain that was (its compactions are the same
+/// conversation). A fork of an imported thread has none: it is the
+/// user's.
+pub fn origin(index: &stitch_store::Index, thread: &RecordId) -> Option<Origin> {
+  index.compaction_lineage(thread).iter().find_map(|t| {
+    let r = index.record(t).ok().flatten()?;
+    let field = |k: &str| r.fields.get(k).and_then(Value::as_str).map(str::to_owned);
+    Some(Origin {
+      from: field("imported_from")?,
+      source: field("imported_source").unwrap_or_default(),
+      signed: r.fields.get("imported_signed").and_then(Value::as_bool) == Some(true),
+    })
+  })
+}
+
 /// Whether a message's `from` is an imported one's (`shared:…`).
 pub fn is_shared(from: Option<&str>) -> bool {
   from.is_some_and(|f| f.starts_with(FROM_PREFIX))

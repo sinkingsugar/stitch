@@ -75,6 +75,17 @@ pub struct ThreadInfo {
   /// A room's participants, in roster order.
   #[uniffi(default = [])]
   pub participants: Vec<ParticipantInfo>,
+  /// Imported from a shared file (design §2.31): the manifest's hash
+  /// (`blake3:…`); `None` for the user's own threads, forks of imported
+  /// ones included. Continuing one means forking it.
+  #[uniffi(default = None)]
+  pub imported_from: Option<String>,
+  /// An imported thread's source: the sender's share key (hex).
+  #[uniffi(default = None)]
+  pub imported_source: Option<String>,
+  /// Whether that key signed the file (else it came unsigned).
+  #[uniffi(default = false)]
+  pub imported_signed: bool,
 }
 
 /// A room's participant (design §2.27): its `@handle`, how it is shown,
@@ -3102,40 +3113,46 @@ impl Stitch {
     Ok(
       place::listed(threads, home.as_ref(), &Place::Global, true, &places)
         .into_iter()
-        .map(|(r, at, p)| ThreadInfo {
-          title: index
-            .lineage_title(&r.id)
-            .unwrap_or_else(|| "(untitled)".into()),
-          at: at.as_second(),
-          pinned: index.lineage_pinned(&r.id),
-          state: stitch_node::chat::detached_state(&index, &r).ok().flatten(),
-          place: (p != Place::Global).then(|| p.label(self.name.as_str(), &places)),
-          place_key: (p != Place::Global).then(|| p.key()),
-          read_only: stitch_node::meta::read_only(&index, &r.id),
-          // Spawned from a thread compacted since: under the conversation
-          // it goes on in, which the list has.
-          parent: stitch_node::meta::parent(&index, &r.id)
-            .map(|p| index.compaction_newest(&p).to_string()),
-          earlier: {
-            let mut chain = index.compaction_lineage(&r.id);
-            chain.retain(|t| t != &r.id);
-            chain.into_iter().map(|t| t.to_string()).collect()
-          },
-          goal: r
-            .fields
-            .get("goal")
-            .and_then(|v| v.as_str())
-            .and_then(|g| g.trim().lines().next())
-            .map(|g| g.chars().take(200).collect()),
-          room: r.fields.get("room") == Some(&serde_json::Value::Bool(true)),
-          room_mode: (r.fields.get("room") == Some(&serde_json::Value::Bool(true)))
-            .then(|| stitch_node::rooms::policy(&index, &r.id).mode),
-          participants: if r.fields.get("room") == Some(&serde_json::Value::Bool(true)) {
-            participants_of(&index, &r.id)
-          } else {
-            Vec::new()
-          },
-          id: r.id.to_string(),
+        .map(|(r, at, p)| {
+          let origin = stitch_node::share::origin(&index, &r.id);
+          ThreadInfo {
+            imported_from: origin.as_ref().map(|o| o.from.clone()),
+            imported_source: origin.as_ref().map(|o| o.source.clone()),
+            imported_signed: origin.as_ref().is_some_and(|o| o.signed),
+            title: index
+              .lineage_title(&r.id)
+              .unwrap_or_else(|| "(untitled)".into()),
+            at: at.as_second(),
+            pinned: index.lineage_pinned(&r.id),
+            state: stitch_node::chat::detached_state(&index, &r).ok().flatten(),
+            place: (p != Place::Global).then(|| p.label(self.name.as_str(), &places)),
+            place_key: (p != Place::Global).then(|| p.key()),
+            read_only: stitch_node::meta::read_only(&index, &r.id),
+            // Spawned from a thread compacted since: under the conversation
+            // it goes on in, which the list has.
+            parent: stitch_node::meta::parent(&index, &r.id)
+              .map(|p| index.compaction_newest(&p).to_string()),
+            earlier: {
+              let mut chain = index.compaction_lineage(&r.id);
+              chain.retain(|t| t != &r.id);
+              chain.into_iter().map(|t| t.to_string()).collect()
+            },
+            goal: r
+              .fields
+              .get("goal")
+              .and_then(|v| v.as_str())
+              .and_then(|g| g.trim().lines().next())
+              .map(|g| g.chars().take(200).collect()),
+            room: r.fields.get("room") == Some(&serde_json::Value::Bool(true)),
+            room_mode: (r.fields.get("room") == Some(&serde_json::Value::Bool(true)))
+              .then(|| stitch_node::rooms::policy(&index, &r.id).mode),
+            participants: if r.fields.get("room") == Some(&serde_json::Value::Bool(true)) {
+              participants_of(&index, &r.id)
+            } else {
+              Vec::new()
+            },
+            id: r.id.to_string(),
+          }
         })
         .collect(),
     )
