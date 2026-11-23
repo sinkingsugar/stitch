@@ -2049,12 +2049,22 @@ pub(crate) fn messages_from<'e>(
   // another user's machines, so they and their results are text.
   let mut shared_turn = false;
   let mut shared_calls: std::collections::HashSet<&str> = Default::default();
+  // Shared messages come after the import's note, or a fence of their own.
+  let mut fenced = false;
   for e in events {
     {
       match e {
         Event::Msg(m) => {
           shared_turn = m.role == Role::Assistant && crate::share::is_shared(m.from.as_deref());
           close_pending(&mut messages, &mut pending);
+          if m.from.as_deref() == Some(crate::share::NOTE_FROM) {
+            fenced = true;
+          } else if crate::share::is_shared(m.from.as_deref()) && !fenced {
+            fenced = true;
+            messages.push(Message::user(vec![Content::Text(
+              crate::share::FENCE.into(),
+            )]));
+          }
           let mut content = parts_content(&m.parts, blobs)?;
           if let Some(note) = time_note_for(m, last_at) {
             content.insert(0, Content::Text(note));
@@ -2516,6 +2526,10 @@ pub fn spawned_header(
 
 /// The conversation as a fork takes it (`Shape`).
 pub fn shaped(mut events: Vec<Event>, shape: &Shape) -> Vec<Event> {
+  // A summary of a shared conversation (design §2.31) is foreign too.
+  let foreign = events
+    .iter()
+    .any(|e| matches!(e, Event::Msg(m) if crate::share::is_shared(m.from.as_deref())));
   if shape.no_tools {
     events.retain(|e| !matches!(e, Event::ToolCall(_) | Event::ToolResult(_)));
     for e in &mut events {
@@ -2584,7 +2598,12 @@ pub fn shaped(mut events: Vec<Event>, shape: &Shape) -> Vec<Event> {
         model: None,
         parts: vec![Part::Text {
           text: format!(
-            "[This conversation continues an earlier one. Summary of what came before{}:]\n\n{summary}",
+            "{}[This conversation continues an earlier one. Summary of what came before{}:]\n\n{summary}",
+            if foreign {
+              format!("{}\n\n", crate::share::FENCE)
+            } else {
+              String::new()
+            },
             if keep.unwrap_or(0) > 0 {
               " the messages that follow"
             } else {

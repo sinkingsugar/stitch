@@ -107,7 +107,11 @@ Any relevant details that will be required to continue the conversation.
 /// a model (`[threads] summary_model`, else quick, with a thread-model
 /// fallback for context/completeness when quick was chosen automatically).
 pub(crate) async fn fork(s: &Arc<Shared>, spec: ForkSpec) -> Result<RecordId> {
-  fork_with(s, spec, Ok, &mut SummarySpent::default()).await
+  let from = spec.thread.clone();
+  let id = fork_with(s, spec, Ok, &mut SummarySpent::default()).await?;
+  // A fork of an imported thread has tools (design §2.31).
+  crate::share::forked(s, &from, &id)?;
+  Ok(id)
 }
 
 /// What a fork of `spec` continues, and the events it takes of it.

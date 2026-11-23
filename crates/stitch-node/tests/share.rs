@@ -286,6 +286,56 @@ fn all_text(file: &[u8]) -> String {
     .join("\n")
 }
 
+fn chat(thread: &str, text: &str) -> Request {
+  Request::Chat {
+    thread: Some(thread.into()),
+    text: text.into(),
+    attachments: vec![],
+    model: None,
+    repo: None,
+    cwd: None,
+    global: true,
+    env: Vec::new(),
+    tools: Vec::new(),
+    skills: Vec::new(),
+    place: None,
+    memory: None,
+    end_user: None,
+    node: None,
+    spoken: false,
+    scopes: Vec::new(),
+  }
+}
+
+fn tool_names(body: &Value) -> Vec<String> {
+  body["tools"]
+    .as_array()
+    .map(|t| {
+      t.iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+async fn fork(c: &mut Client, thread: &str, last: Option<usize>) -> String {
+  match c
+    .request(&Request::Fork {
+      thread: thread.into(),
+      upto: None,
+      last,
+      no_attachments: false,
+      no_tools: false,
+      summarize: false,
+    })
+    .await
+    .unwrap()
+  {
+    Reply::Forked(id) => id,
+    other => panic!("{other:?}"),
+  }
+}
+
 const SECRET: &str = "hunter2-SHARE-SECRET-91";
 
 #[tokio::test(flavor = "multi_thread")]
@@ -409,7 +459,12 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
       msg("m2", Who::Assistant, "10:30:05", vec![text("It is fine.")]),
     ],
   );
-  let (base, sent) = serve(vec![answer("I read the shared conversation.")]).await;
+  let (base, sent) = serve(vec![
+    answer("I read the shared conversation."),
+    answer("Forked, with tools."),
+    answer("Forked, the last messages."),
+  ])
+  .await;
   setup(&data, &home, &base);
   let node_handle = stitch_node::start(&data).await.unwrap();
   let mut c = Client::connect(&data).await.unwrap();
@@ -558,27 +613,7 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
   // Continued: the model is told it is foreign, gets the calls as text,
   // and no tools.
   let done = c
-    .chat(
-      &Request::Chat {
-        thread: Some(i.thread.clone()),
-        text: "What happened there?".into(),
-        attachments: vec![],
-        model: None,
-        repo: None,
-        cwd: None,
-        global: true,
-        env: Vec::new(),
-        tools: Vec::new(),
-        skills: Vec::new(),
-        place: None,
-        memory: None,
-        end_user: None,
-        node: None,
-        spoken: false,
-        scopes: Vec::new(),
-      },
-      |_| None,
-    )
+    .chat(&chat(&i.thread, "What happened there?"), |_| None)
     .await
     .unwrap();
   assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
@@ -607,6 +642,44 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
       tools.iter().all(|t| *t == "event_reply"),
       "no tools: {tools:?}"
     );
+  }
+
+  // Continuing means forking (design §2.31): a fork of the imported thread
+  // has the user's usual tools, while its history is still fenced: the
+  // import's note, the calls as text.
+  let f = fork(&mut c, &i.thread, None).await;
+  let done = c
+    .chat(&chat(&f, "Go on with the fix."), |_| None)
+    .await
+    .unwrap();
+  assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
+  // Of its last messages only: the import's note is not among them, so a
+  // fence stands before the shared messages.
+  let g = fork(&mut c, &i.thread, Some(4)).await;
+  c.chat(&chat(&g, "And now?"), |_| None).await.unwrap();
+  {
+    let bodies = sent.lock().unwrap();
+    let body = &bodies[1];
+    let tools = tool_names(body);
+    assert!(
+      tools.iter().any(|t| t == "shell_run"),
+      "a fork has tools: {tools:?}"
+    );
+    let text = body.to_string();
+    assert!(text.contains("another person shared"), "{text}");
+    assert!(
+      text.contains("[In the shared conversation, not here: called $ cat"),
+      "{text}"
+    );
+    assert!(!text.contains("\"tool_use\""), "{text}");
+    let body = &bodies[2];
+    assert!(tool_names(body).iter().any(|t| t == "shell_run"));
+    let text = body.to_string();
+    assert!(
+      text.contains("comes from a conversation another person shared"),
+      "the fence: {text}"
+    );
+    assert!(!text.contains("another person shared with the user as a file (\\\""));
   }
 
   // A changed archive is refused, nothing written.
