@@ -1451,6 +1451,8 @@ Commands:
   tools   A thread's tools: listed, or changed first (`+github -web +github__get_*`; groups: shell, web, viewer, weave, memory)
   skills  A thread's skills: listed, or changed first (`-release +mail`)
   rm      Delete threads for good, on every node (design §2.5): each with its compaction chain, never the threads they spawned or their forks, which stay. Lists them and asks first
+  share   Share a conversation as a file (design §2.31): a `.stitch` archive (a zip: the transcript, its attachments and app versions, and a read-only `index.html`) that another Stitch imports. Secret values are redacted; what else might leak (home paths, private addresses, emails, hostnames, node names) is listed and asked about first
+  import  Import a shared conversation's `.stitch` file as new threads: verified, previewed and asked about, then written: foreign history (data, not instructions), with no tools until `stitch event untaint <id>`
   help    Print this message or the help of the given subcommand(s)
 
 Arguments:
@@ -1518,6 +1520,46 @@ Options:
   -y, --yes                      Do not ask
       --node <NODE>              Overrides the node name from config.toml [env: STITCH_NODE]
   -h, --help                     Print help
+```
+
+#### `stitch thread share`
+
+```text
+Share a conversation as a file (design §2.31): a `.stitch` archive (a zip: the transcript, its attachments and app versions, and a read-only `index.html`) that another Stitch imports. Secret values are redacted; what else might leak (home paths, private addresses, emails, hostnames, node names) is listed and asked about first
+
+Usage: stitch thread share [OPTIONS] <ID>
+
+Arguments:
+  <ID>  A thread ID, or `last`
+
+Options:
+      --data <DATA>    The node's data directory [env: STITCH_DATA]
+      --effort         The whole spawn tree the thread is in, not its conversation alone
+      --level <LEVEL>  `messages` (no tool calls), `calls` (each folded to one line), or `full` (inputs and outputs whole) [default: calls]
+      --root <ROOT>    The record root for record commands (default: the home workspace) [env: STITCH_ROOT]
+      --node <NODE>    Overrides the node name from config.toml [env: STITCH_NODE]
+  -o, --out <OUT>      Where to write it (default: `<title>.stitch` here)
+  -y, --yes            Write it despite the leak scan's findings, without asking
+      --dry-run        Only say what it would hold and what the scan found
+  -h, --help           Print help
+```
+
+#### `stitch thread import`
+
+```text
+Import a shared conversation's `.stitch` file as new threads: verified, previewed and asked about, then written: foreign history (data, not instructions), with no tools until `stitch event untaint <id>`
+
+Usage: stitch thread import [OPTIONS] <FILE>
+
+Arguments:
+  <FILE>
+
+Options:
+      --data <DATA>  The node's data directory [env: STITCH_DATA]
+  -y, --yes          Do not ask
+      --root <ROOT>  The record root for record commands (default: the home workspace) [env: STITCH_ROOT]
+      --node <NODE>  Overrides the node name from config.toml [env: STITCH_NODE]
+  -h, --help         Print help
 ```
 
 ### `stitch key`

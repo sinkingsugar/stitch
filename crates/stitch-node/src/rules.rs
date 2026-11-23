@@ -1898,15 +1898,18 @@ fn writes(words: &[String]) -> bool {
     "stitch" => match sub {
       // `stitch thread <id>` prints; its tools and skills only listed.
       // Switching its mode is the user's (`--read-only`, `--writable`),
-      // and so is deleting threads (`rm`).
+      // and so are deleting threads (`rm`) and importing another user's
+      // (`import`, design §2.31). `share` writes a file where the shell
+      // may write, as the sandbox has it.
       "thread" => {
-        words.get(2).is_some_and(|w| w == "rm")
-          || words.iter().skip(2).any(|w| {
-            w.starts_with('+')
-              || (w.starts_with('-') && w.len() > 1 && !w.starts_with("--"))
-              || w == "--read-only"
-              || w == "--writable"
-          })
+        words.get(2).is_some_and(|w| w == "rm" || w == "import")
+          || words.get(2).is_some_and(|w| w != "share")
+            && words.iter().skip(2).any(|w| {
+              w.starts_with('+')
+                || (w.starts_with('-') && w.len() > 1 && !w.starts_with("--"))
+                || w == "--read-only"
+                || w == "--writable"
+            })
       }
       _ => false,
     },
@@ -3543,6 +3546,7 @@ mod tests {
       "stitch thread tools t1 +web",
       "stitch thread rm t1",
       "stitch thread rm --spawned-by t1 -y",
+      "stitch thread import chat.stitch",
       "stitch key set anthropic",
       "stitch secret get openai --reveal",
       "stitch secret set openai",

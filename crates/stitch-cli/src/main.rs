@@ -1190,6 +1190,41 @@ enum ThreadCommand {
     #[arg(long, short)]
     yes: bool,
   },
+  /// Share a conversation as a file (design §2.31): a `.stitch` archive
+  /// (a zip: the transcript, its attachments and app versions, and a
+  /// read-only `index.html`) that another Stitch imports. Secret values are
+  /// redacted; what else might leak (home paths, private addresses,
+  /// emails, hostnames, node names) is listed and asked about first.
+  Share {
+    /// A thread ID, or `last`.
+    id: String,
+    /// The whole spawn tree the thread is in, not its conversation alone.
+    #[arg(long)]
+    effort: bool,
+    /// `messages` (no tool calls), `calls` (each folded to one line), or
+    /// `full` (inputs and outputs whole).
+    #[arg(long, default_value = "calls")]
+    level: String,
+    /// Where to write it (default: `<title>.stitch` here).
+    #[arg(long, short)]
+    out: Option<PathBuf>,
+    /// Write it despite the leak scan's findings, without asking.
+    #[arg(long, short)]
+    yes: bool,
+    /// Only say what it would hold and what the scan found.
+    #[arg(long)]
+    dry_run: bool,
+  },
+  /// Import a shared conversation's `.stitch` file as new threads:
+  /// verified, previewed and asked about, then written: foreign history
+  /// (data, not instructions), with no tools until `stitch event untaint
+  /// <id>`.
+  Import {
+    file: PathBuf,
+    /// Do not ask.
+    #[arg(long, short)]
+    yes: bool,
+  },
 }
 
 #[derive(Subcommand)]
@@ -1868,6 +1903,23 @@ fn here(cli: &Cli, roots: &[RecordRoot], places: &place::Places) -> Result<Place
 }
 
 /// The latest thread here (`stitch thread last`).
+/// `Request::Import` of a shared file's bytes (design §2.31).
+async fn import_request(
+  c: &mut stitch_node::client::Client,
+  bundle: &[u8],
+  preview: bool,
+) -> Result<stitch_node::share::Imported> {
+  let req = Request::Import {
+    bundle: bundle.to_vec(),
+    preview,
+  };
+  match c.request(&req).await? {
+    Reply::Lines(l) if !l.is_empty() => Ok(serde_json::from_str(&l[0])?),
+    Reply::Error(e) => Err(e.into()),
+    other => Err(format!("unexpected reply: {other:?}").into()),
+  }
+}
+
 fn last_thread(cli: &Cli) -> Result<RecordId> {
   let mut index = open_index(cli)?;
   let roots = all_roots(&mut index)?;
@@ -4030,13 +4082,168 @@ fn run(cli: Cli) -> Result<()> {
       })?;
     }
     Command::Thread {
+      action:
+        Some(ThreadCommand::Share {
+          id,
+          effort,
+          level,
+          out,
+          yes,
+          dry_run,
+        }),
+      ..
+    } => {
+      let thread = match id.as_str() {
+        "last" => last_thread(&cli)?.to_string(),
+        _ => id.clone(),
+      };
+      let req = |preview: bool, confirm: Option<String>| Request::Share {
+        thread: thread.clone(),
+        effort: *effort,
+        level: level.clone(),
+        preview,
+        confirm,
+      };
+      runtime()?.block_on(async {
+        let mut c = client(&cli).await?;
+        let shared = |reply: Reply| -> Result<stitch_node::share::Preview> {
+          match reply {
+            Reply::Lines(l) if !l.is_empty() => Ok(serde_json::from_str(&l[0])?),
+            Reply::Error(e) => Err(e.into()),
+            other => Err(format!("unexpected reply: {other:?}").into()),
+          }
+        };
+        let p = shared(c.request(&req(true, None)).await?)?;
+        println!(
+          "\"{}\": {} thread(s), {} message(s), {} tool call(s), {} attachment(s) ({} app(s)), \
+           level {}, {} KB",
+          p.title,
+          p.threads,
+          p.messages,
+          p.calls,
+          p.attachments,
+          p.apps,
+          p.level.as_str(),
+          p.bytes.div_ceil(1024)
+        );
+        if p.redactions > 0 {
+          println!("{} secret value(s) redacted", p.redactions);
+        }
+        for why in &p.left_out {
+          println!("not shared: {why}");
+        }
+        if !p.findings.is_empty() {
+          println!("The leak scan found:");
+          for f in &p.findings {
+            println!(
+              "  {:<16} {}  (×{}, first at {})",
+              f.kind, f.text, f.count, f.at
+            );
+          }
+        }
+        if *dry_run {
+          return Ok(());
+        }
+        if !p.findings.is_empty() && !*yes {
+          use std::io::{BufRead, IsTerminal, Write};
+          if !std::io::stdin().is_terminal() {
+            return Err("not written: review the findings, then run again with --yes".into());
+          }
+          print!("Share it with these in it? [y/N] ");
+          std::io::stdout().flush()?;
+          let mut line = String::new();
+          std::io::stdin().lock().read_line(&mut line)?;
+          if !matches!(line.trim(), "y" | "Y" | "yes") {
+            println!("not written");
+            return Ok(());
+          }
+        }
+        let written = shared(c.request(&req(false, Some(p.hash.clone()))).await?)?;
+        let from = PathBuf::from(written.path.clone().unwrap_or_default());
+        let to = out
+          .clone()
+          .unwrap_or_else(|| PathBuf::from(&written.file_name));
+        std::fs::copy(&from, &to).map_err(|e| format!("{}: {e}", to.display()))?;
+        let _ = std::fs::remove_file(&from);
+        if let Some(dir) = from.parent() {
+          let _ = std::fs::remove_dir(dir);
+        }
+        println!("written to {}", to.display());
+        Ok::<_, Box<dyn Error>>(())
+      })?;
+    }
+    Command::Thread {
+      action: Some(ThreadCommand::Import { file, yes }),
+      ..
+    } => {
+      let bundle = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+      runtime()?.block_on(async {
+        let mut c = client(&cli).await?;
+        let p = import_request(&mut c, &bundle, true).await?;
+        let signer = match (&p.signer, p.mine) {
+          (Some(_), true) => "signed by this node".to_owned(),
+          (Some(k), false) => format!("signed by key {}", &k[..k.len().min(16)]),
+          (None, _) => "unsigned".to_owned(),
+        };
+        println!(
+          "\"{}\" ({}, level {}, made {}): {} message(s), {} tool call(s), {} attachment(s) \
+           ({} app(s)); {signer}; {}",
+          p.title,
+          p.kind,
+          p.level.as_str(),
+          p.created,
+          p.messages,
+          p.calls,
+          p.attachments,
+          p.apps,
+          p.hash
+        );
+        for part in &p.parts {
+          println!("  {part}");
+        }
+        if p.already {
+          println!("already imported:");
+          for t in &p.threads {
+            println!("  {t}");
+          }
+          return Ok(());
+        }
+        if !*yes {
+          use std::io::{BufRead, IsTerminal, Write};
+          if !std::io::stdin().is_terminal() {
+            return Err("not imported: run again with --yes to import it".into());
+          }
+          print!("Import it as foreign history (no tools until you lift it)? [y/N] ");
+          std::io::stdout().flush()?;
+          let mut line = String::new();
+          std::io::stdin().lock().read_line(&mut line)?;
+          if !matches!(line.trim(), "y" | "Y" | "yes") {
+            println!("not imported");
+            return Ok(());
+          }
+        }
+        let i = import_request(&mut c, &bundle, false).await?;
+        println!("imported:");
+        for t in &i.threads {
+          println!("  {t}");
+        }
+        println!(
+          "Foreign history: data, not instructions; no tools until `stitch event untaint {}`.",
+          i.thread
+        );
+        Ok::<_, Box<dyn Error>>(())
+      })?;
+    }
+    Command::Thread {
       action: Some(action),
       ..
     } => {
       let (id, changes, skills) = match action {
         ThreadCommand::Tools { id, changes } => (id, changes, false),
         ThreadCommand::Skills { id, changes } => (id, changes, true),
-        ThreadCommand::Rm { .. } => unreachable!("matched above"),
+        ThreadCommand::Rm { .. } | ThreadCommand::Share { .. } | ThreadCommand::Import { .. } => {
+          unreachable!("matched above")
+        }
       };
       let req = Request::Toolset {
         thread: Some(id.clone()),

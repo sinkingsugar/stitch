@@ -575,6 +575,97 @@ pub struct Pressed {
   pub output: String,
 }
 
+/// Something sharing's leak scan found (design §2.31): its kind (`home
+/// path`, `private address`, `email`, `hostname`, `node name`, `user
+/// name`), the text, how often, and where first (`t1#m4`, `title`).
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ShareFinding {
+  pub kind: String,
+  pub text: String,
+  pub count: u32,
+  pub at: String,
+}
+
+/// What sharing a thread holds (`share_preview`), or wrote
+/// (`share_export`: `path`, the file in the node's downloads, named
+/// `file_name`). `hash` is what `share_export` takes as `confirm` when
+/// there are findings, which the app shows the user first.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct SharePreview {
+  pub title: String,
+  pub kind: String,
+  pub level: String,
+  pub threads: u32,
+  pub messages: u32,
+  pub calls: u32,
+  pub attachments: u32,
+  pub apps: u32,
+  pub left_out: Vec<String>,
+  pub bytes: u64,
+  pub hash: String,
+  pub key: String,
+  pub redactions: u32,
+  pub findings: Vec<ShareFinding>,
+  pub file_name: String,
+  pub path: Option<String>,
+}
+
+impl From<stitch_node::share::Preview> for SharePreview {
+  fn from(p: stitch_node::share::Preview) -> Self {
+    SharePreview {
+      title: p.title,
+      kind: p.kind,
+      level: p.level.as_str().to_owned(),
+      threads: p.threads as u32,
+      messages: p.messages as u32,
+      calls: p.calls as u32,
+      attachments: p.attachments as u32,
+      apps: p.apps as u32,
+      left_out: p.left_out,
+      bytes: p.bytes as u64,
+      hash: p.hash,
+      key: p.key,
+      redactions: p.redactions as u32,
+      findings: p
+        .findings
+        .into_iter()
+        .map(|f| ShareFinding {
+          kind: f.kind,
+          text: f.text,
+          count: f.count as u32,
+          at: f.at,
+        })
+        .collect(),
+      file_name: p.file_name,
+      path: p.path,
+    }
+  }
+}
+
+/// What a shared file would import (`import_preview`: `written` false, no
+/// threads) or made (`import_thread`): the thread to open, every thread
+/// made, the file's parts (`t1 <title>`), and who signed it (`signer`,
+/// hex; `mine`: this node's own key; none: unsigned). `already`: the same
+/// file was imported before, and those are its threads.
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ImportedThread {
+  pub thread: String,
+  pub threads: Vec<String>,
+  pub parts: Vec<String>,
+  pub title: String,
+  pub hash: String,
+  pub signer: Option<String>,
+  pub mine: bool,
+  pub level: String,
+  pub kind: String,
+  pub messages: u32,
+  pub calls: u32,
+  pub attachments: u32,
+  pub apps: u32,
+  pub already: bool,
+  pub written: bool,
+}
+
 /// A preset answer (design §2.30): the button's `label`, the message its
 /// press sends (`text`, the label unless the agent gave another).
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
@@ -1605,6 +1696,47 @@ impl Stitch {
       Reply::Error(e) => Err(StitchError::of(e)),
       other => Err(StitchError::of(format!("unexpected reply: {other:?}"))),
     }
+  }
+
+  /// What sharing `thread` as a file would hold (design §2.31): its
+  /// conversation, or with `effort` the spawn tree it is in, at `level`
+  /// (`messages`, `calls`, `full`; empty: `calls`), redacted, with what
+  /// the leak scan found. Nothing is written.
+  pub async fn share_preview(
+    &self,
+    thread: String,
+    effort: bool,
+    level: String,
+  ) -> Result<SharePreview> {
+    self.share(thread, effort, level, true, None).await
+  }
+
+  /// Shares `thread` as a file in the node's downloads (`path` in the
+  /// result, to hand to the share sheet). With findings, written only when
+  /// `confirm` is the `hash` of a preview the user saw.
+  pub async fn share_export(
+    &self,
+    thread: String,
+    effort: bool,
+    level: String,
+    confirm: Option<String>,
+  ) -> Result<SharePreview> {
+    self.share(thread, effort, level, false, confirm).await
+  }
+
+  /// What a shared `.stitch` file would import (design §2.31), verified
+  /// whole, nothing written: its title, parts, counts and signer, or the
+  /// threads it made when it was imported before (`already`).
+  pub async fn import_preview(&self, path: String) -> Result<ImportedThread> {
+    self.import(path, true).await
+  }
+
+  /// Imports a shared `.stitch` file (AirDrop, Messages, Mail: the file
+  /// the app was opened with), after `import_preview`: its blobs and new
+  /// threads written, foreign history with no tools until the user lifts
+  /// it.
+  pub async fn import_thread(&self, path: String) -> Result<ImportedThread> {
+    self.import(path, false).await
   }
 
   /// Rewinds a thread to message `upto` (its start: `None`), design §2.15:
@@ -3403,6 +3535,61 @@ impl Stitch {
   }
 
   /// A request whose reply is `Ok`.
+  async fn import(&self, path: String, preview: bool) -> Result<ImportedThread> {
+    let bundle = std::fs::read(&path).map_err(|e| StitchError::of(format!("{path}: {e}")))?;
+    match self.request(Request::Import { bundle, preview }).await? {
+      Reply::Lines(l) if !l.is_empty() => {
+        let i: stitch_node::share::Imported =
+          serde_json::from_str(&l[0]).map_err(|e| StitchError::of(e.to_string()))?;
+        Ok(ImportedThread {
+          thread: i.thread,
+          threads: i.threads,
+          parts: i.parts,
+          title: i.title,
+          hash: i.hash,
+          signer: i.signer,
+          mine: i.mine,
+          level: i.level.as_str().to_owned(),
+          kind: i.kind,
+          messages: i.messages as u32,
+          calls: i.calls as u32,
+          attachments: i.attachments as u32,
+          apps: i.apps as u32,
+          already: i.already,
+          written: i.written,
+        })
+      }
+      Reply::Error(e) => Err(StitchError::of(e)),
+      other => Err(StitchError::of(format!("unexpected reply: {other:?}"))),
+    }
+  }
+
+  async fn share(
+    &self,
+    thread: String,
+    effort: bool,
+    level: String,
+    preview: bool,
+    confirm: Option<String>,
+  ) -> Result<SharePreview> {
+    let req = Request::Share {
+      thread,
+      effort,
+      level,
+      preview,
+      confirm,
+    };
+    match self.request(req).await? {
+      Reply::Lines(l) if !l.is_empty() => {
+        let p: stitch_node::share::Preview =
+          serde_json::from_str(&l[0]).map_err(|e| StitchError::of(e.to_string()))?;
+        Ok(p.into())
+      }
+      Reply::Error(e) => Err(StitchError::of(e)),
+      other => Err(StitchError::of(format!("unexpected reply: {other:?}"))),
+    }
+  }
+
   async fn done(&self, req: Request) -> Result<()> {
     match self.request(req).await? {
       Reply::Ok => Ok(()),

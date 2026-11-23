@@ -930,6 +930,29 @@ pub enum Request {
     input: String,
     cwd: Option<String>,
   },
+  /// Shares a thread as an archive (design §2.31): its conversation (its
+  /// compaction chain), or with `effort` the spawn tree it is in, at
+  /// `level` (`messages`, `calls`, `full`; empty: `calls`), redacted. With
+  /// `preview`, nothing is written; otherwise the bundle is written into
+  /// the node's downloads, and when the leak scan found something only if
+  /// `confirm` is the payload's hash a preview gave. `Reply::Lines`: one
+  /// JSON line, `share::Preview` (`path` set once written).
+  Share {
+    thread: String,
+    effort: bool,
+    level: String,
+    preview: bool,
+    #[cfg_attr(feature = "ts", ts(optional = nullable))]
+    confirm: Option<String>,
+  },
+  /// Imports a shared thread's archive (design §2.31), its bytes:
+  /// verified whole; with `preview`, only said (nothing written), else
+  /// its blobs and new threads written, foreign and tainted.
+  /// `Reply::Lines`: one JSON line, `share::Imported`.
+  Import {
+    bundle: Vec<u8>,
+    preview: bool,
+  },
 }
 
 /// An event's question (docs/events.md §3): answered by a thread's
@@ -2051,6 +2074,17 @@ mod wire_tests {
       Events {
         input: s("{}"),
         cwd: some("/"),
+      },
+      Share {
+        thread: s("t"),
+        effort: true,
+        level: s("calls"),
+        preview: true,
+        confirm: some("blake3:00"),
+      },
+      Import {
+        bundle: vec![1, 2, 3],
+        preview: true,
       },
     ]
   }

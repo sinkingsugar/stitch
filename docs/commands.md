@@ -45,6 +45,8 @@ Use command-specific `--on` for delegation or schedules, and `stitch model ls
 | `thread tools <id> [changes…]` | List/change tools, e.g. `+github -web` |
 | `thread skills <id> [changes…]` | List/change skills, e.g. `-release +mail` |
 | `thread rm [ids…]` | Delete across nodes after confirmation, with compaction chains. `--spawned-by <id>` also selects immediate children; `--yes` skips confirmation |
+| `thread share <id>` | Share a conversation as a `.stitch` archive (a zip: transcript, attachments and app versions as blobs, a read-only `index.html`; design §2.31): secrets redacted, a leak scan listed and asked about first. `--effort` the whole spawn tree; `--level messages\|calls\|full`; `--out <file>`; `--dry-run`; `--yes` |
+| `thread import <file>` | Import a shared `.stitch` file: verified (every entry's hash, the signature), previewed and asked about (`--yes` not), then written as foreign history with no tools until `stitch event untaint <id>` |
 | `send <thread> [text]` | Continue on its owning node; `--from <thread>` receives the report, `--interject` weaves into a running turn, `--no-wake` keeps the report without waking the recipient |
 | `cancel <thread>` | Stop a detached thread |
 | `rename <thread> <title…>` | Set a synced title |

@@ -194,6 +194,8 @@ fn parent_of(index: &Index, thread: &RecordId) -> Option<RecordId> {
     .iter()
     .find(|e| e.rel == "spawned-by")
     .or_else(|| edges.iter().find(|e| e.rel == "reports-to"))
+    // An imported effort's threads (design §2.31).
+    .or_else(|| edges.iter().find(|e| e.rel == crate::share::UNDER))
     .map(|e| e.dst.id.clone())
     .filter(|p| p != thread)
 }
@@ -201,7 +203,7 @@ fn parent_of(index: &Index, thread: &RecordId) -> Option<RecordId> {
 /// Threads spawned by (or reporting to) `thread`, oldest first.
 fn children_of(index: &Index, thread: &RecordId) -> Vec<RecordId> {
   let mut out: Vec<(Timestamp, RecordId)> = Vec::new();
-  for rel in ["spawned-by", "reports-to"] {
+  for rel in ["spawned-by", "reports-to", crate::share::UNDER] {
     for r in index
       .sources(kinds::THREAD, rel, thread, None)
       .unwrap_or_default()

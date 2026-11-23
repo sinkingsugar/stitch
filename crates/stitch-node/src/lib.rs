@@ -72,6 +72,7 @@ mod secret;
 pub mod secrets;
 mod selfimprove;
 pub mod setup;
+pub mod share;
 mod ssh;
 #[cfg(not(any(target_os = "ios", target_os = "visionos")))]
 mod toasts;
@@ -93,7 +94,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// The version local clients and the node must agree on: the package's,
 /// and the local protocol's, bumped whenever `api` changes shape.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/local-73");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/local-74");
 
 /// The format of the store (records, segments, the index) this build
 /// writes: bumped by a migration an older build cannot read after
@@ -123,7 +124,7 @@ pub fn build() -> &'static str {
 /// same version but another shape misreads every message (an old
 /// browser-host retried for hours against a node with two new requests).
 #[cfg(test)]
-const API_SHAPE: &str = "0355cd57d85e7313";
+const API_SHAPE: &str = "c9a361c20e0138b2";
 
 /// What `STORE_FORMAT` stands for: a hash of the code that reads and
 /// writes the store's files (the migrations, the record and segment

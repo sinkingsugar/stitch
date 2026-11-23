@@ -193,6 +193,56 @@ pub fn store_tree(blobs: &BlobStore, flat: &Flat) -> Result<(BlobHash, NewBlobs)
   Ok((root, new))
 }
 
+/// Every blob a root tree holds: its trees (no path) and its files (with
+/// their paths), for a copy of it elsewhere (a shared app, design §2.31);
+/// the blobs missing here, when some are.
+pub(crate) fn tree_blobs(
+  blobs: &BlobStore,
+  root: &BlobHash,
+) -> std::result::Result<Vec<(Option<String>, BlobHash)>, Vec<BlobHash>> {
+  let mut out = vec![(None, *root)];
+  let mut missing = Vec::new();
+  let mut todo = vec![(String::new(), *root)];
+  while let Some((at, hash)) = todo.pop() {
+    let Ok(bytes) = std::fs::read(blobs.path(&hash)) else {
+      missing.push(hash);
+      continue;
+    };
+    let Ok(tree) = serde_json::from_slice::<Tree>(&bytes) else {
+      continue;
+    };
+    for (name, node) in tree.entries {
+      if bad_name(&name) {
+        continue;
+      }
+      let path = if at.is_empty() {
+        name
+      } else {
+        format!("{at}/{name}")
+      };
+      match node {
+        Node::Dir { tree } => {
+          out.push((None, tree));
+          todo.push((path, tree));
+        }
+        Node::File { hash, .. } => {
+          if blobs.contains(&hash) {
+            out.push((Some(path), hash));
+          } else {
+            missing.push(hash);
+          }
+        }
+        Node::Skip | Node::Project { .. } => {}
+      }
+    }
+  }
+  if missing.is_empty() {
+    Ok(out)
+  } else {
+    Err(missing)
+  }
+}
+
 /// The paths a root tree holds; the trees missing here, when some are.
 pub fn load_tree(blobs: &BlobStore, root: &BlobHash) -> std::result::Result<Flat, Vec<BlobHash>> {
   let mut flat = Flat::new();

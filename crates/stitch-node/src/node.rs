@@ -6098,6 +6098,46 @@ where
         }
         Err(e) => Err(e.into()),
       },
+      Request::Share {
+        thread,
+        effort,
+        level,
+        preview,
+        confirm,
+      } => async {
+        let t: RecordId = thread.parse()?;
+        let t = s
+          .state()
+          .index
+          .lock()
+          .expect("index lock")
+          .compaction_newest(&t);
+        let level = crate::share::Level::parse(&level)?;
+        let s2 = s.clone();
+        let p = tokio::task::spawn_blocking(move || {
+          if preview {
+            crate::share::preview(&s2, &t, effort, level)
+          } else {
+            crate::share::export(&s2, &t, effort, level, confirm.as_deref())
+          }
+        })
+        .await
+        .map_err(|e| Error::Config(e.to_string()))??;
+        Ok(Reply::Lines(vec![
+          serde_json::to_string(&p).expect("a preview serializes"),
+        ]))
+      }
+      .await,
+      Request::Import { bundle, preview } => async {
+        let s2 = s.clone();
+        let i = tokio::task::spawn_blocking(move || crate::share::import(&s2, &bundle, !preview))
+          .await
+          .map_err(|e| Error::Config(e.to_string()))??;
+        Ok(Reply::Lines(vec![
+          serde_json::to_string(&i).expect("an import serializes"),
+        ]))
+      }
+      .await,
       Request::Quote { thread } => thread
         .parse()
         .map_err(Error::from)

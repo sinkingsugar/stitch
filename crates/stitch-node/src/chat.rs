@@ -72,7 +72,10 @@ pub const NO_REPLY: &str = "[Stitch: your turn ended without a reply: the user s
 
 /// A message the model reads but no transcript shows: `NO_REPLY`.
 pub fn unshown(m: &Msg) -> bool {
-  m.from.as_deref() == Some(NO_REPLY_FROM)
+  matches!(
+    m.from.as_deref(),
+    Some(NO_REPLY_FROM | crate::share::NOTE_FROM)
+  )
 }
 
 /// A message for a loop while it runs: given to the model between its
@@ -2042,10 +2045,15 @@ pub(crate) fn messages_from<'e>(
   // Action buttons the user pressed that did not wake the model (design
   // §2.30): told with the user's next message.
   let mut presses: Vec<String> = Vec::new();
+  // A shared conversation's reply (design §2.31): its calls ran on
+  // another user's machines, so they and their results are text.
+  let mut shared_turn = false;
+  let mut shared_calls: std::collections::HashSet<&str> = Default::default();
   for e in events {
     {
       match e {
         Event::Msg(m) => {
+          shared_turn = m.role == Role::Assistant && crate::share::is_shared(m.from.as_deref());
           close_pending(&mut messages, &mut pending);
           let mut content = parts_content(&m.parts, blobs)?;
           if let Some(note) = time_note_for(m, last_at) {
@@ -2071,6 +2079,25 @@ pub(crate) fn messages_from<'e>(
             Role::User | Role::System => Message::user(content),
           });
           count += 1;
+        }
+        Event::ToolCall(c) if shared_turn => {
+          shared_calls.insert(c.id.as_str());
+          let text = Content::Text(crate::share::call_text(c));
+          match messages.last_mut() {
+            Some(last) if last.role == PRole::Assistant => last.content.push(text),
+            _ => messages.push(Message {
+              role: PRole::Assistant,
+              content: vec![text],
+              native: None,
+            }),
+          }
+        }
+        Event::ToolResult(r) if shared_calls.contains(r.id.as_str()) => {
+          let text = Content::Text(crate::share::result_text(r));
+          match messages.last_mut() {
+            Some(last) if last.role == PRole::User => last.content.push(text),
+            _ => messages.push(Message::user(vec![text])),
+          }
         }
         Event::ToolCall(c) => {
           if let Some(last) = messages.last_mut()
