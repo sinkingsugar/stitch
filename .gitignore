@@ -1,0 +1,17 @@
+/target/
+.DS_Store
+
+# In a worktree made by `just worktree`, links to the main checkout's.
+/target
+.claude/settings.json
+.vscode/settings.json
+/apps/client/node_modules
+# What checkouts from before the split may still have (the iOS app, the
+# vault service and the meeting bot moved to their own repository).
+/apps/ios/
+/apps/meet/
+/vault/
+
+# `just dev-link` (tools/dev-link.sh): the local overrides of Otter and engram.
+/.cargo/dev-link.toml
+/.cargo/dev-link.toml.new

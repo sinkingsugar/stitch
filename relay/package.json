@@ -1,0 +1,10 @@
+{
+  "name": "stitch-relay",
+  "private": true,
+  "type": "module",
+  "description": "Stitch's push relay: a Cloudflare Worker forwarding encrypted pushes from the user's nodes to their phones through APNs.",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "deploy": "wrangler deploy"
+  }
+}

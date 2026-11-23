@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  # Every branch: agents push feature branches, and each gets checked.
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same ref supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+# GitHub-hosted runners only: a pull request from a fork must never reach a
+# self-hosted runner. Otter and engram are git dependencies Cargo fetches at
+# Cargo.lock's pins (public, no key, no checkout beside this one); every
+# cargo command is --locked, so a Cargo.lock that is not the one committed
+# (one left by `just dev-link`) fails here.
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Line tables only for our crates too (dependencies have them already,
+  # Cargo.toml): backtraces keep their lines, the build a fraction of the
+  # disk.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  check:
+    name: check (Linux)
+    runs-on: ubuntu-latest
+    # A bound for a cold build; the test run has its own, much shorter.
+    timeout-minutes: 90
+    steps:
+      # The runner's disk (about 14 GB free) does not hold the workspace's
+      # debug build and test binaries: the preinstalled SDKs this does not
+      # use go first (a full disk shows as the linker's "Bus error").
+      - name: Disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL
+          df -h / | sed 1d
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      # rust-toolchain.toml pins the toolchain (and its components).
+      - name: Toolchain
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      # llama.cpp (stitch-llama) is built once per configuration into
+      # ~/.cache/stitch/llama, outside target/ (which rust-cache keeps
+      # only for dependencies): cached by its commit and build script.
+      - name: llama.cpp's commit
+        id: llama
+        run: echo "rev=$(git rev-parse HEAD:crates/stitch-llama/llama.cpp)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/stitch/llama
+          key: llama-${{ runner.os }}-${{ github.job }}-${{ steps.llama.outputs.rev }}-${{ hashFiles('crates/stitch-llama/build.rs') }}
+      - uses: taiki-e/install-action@nextest
+      # Pinned: the generated notices are byte-compared, so the
+      # cargo-about that made them (and the cargo-deny that checks deny.toml).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.22.0,cargo-about@0.9.3
+      - name: Format
+        run: cargo fmt -- --check
+      # The dependencies' advisories (RustSEC, yanked crates), licenses,
+      # bans and sources (deny.toml).
+      - name: Dependencies
+        run: cargo deny --locked check advisories licenses bans sources
+      # notices/rust.txt and notices/llama.txt are what `just notices` gives
+      # (the client's part is in client-check, where bun is).
+      - name: Notices
+        run: tools/notices.sh --check rust llama
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Built apart, so the run's own bound is for the tests alone: a test
+      # that hangs (a command waiting on an approval nobody gives, say)
+      # fails the run in minutes.
+      - name: Build tests
+        run: cargo test --workspace --locked --no-run
+      # nextest, a process per test, a failed test tried twice more: the
+      # runner's few cores make some of the timing-heavy tests (nodes that
+      # restart, roll back, are stopped mid-command) slower here; a test
+      # that passes on a retry is reported as FLAKY in the log, and one that
+      # fails three times fails the run. The four harness-less test
+      # binaries (their own main) and the doc tests run with cargo test.
+      - name: Test
+        timeout-minutes: 20
+        run: |
+          cargo nextest run --workspace --locked --retries 2 --no-fail-fast \
+            -E 'not (binary(mcp) | binary(remote_tools) | binary(secrets) | binary(ssh))'
+          cargo test --locked -p stitch-node --test mcp --test remote_tools --test secrets --test ssh
+          cargo test --workspace --locked --doc
+          df -h / | sed 1d
+
+  # The web client's dist/ is committed and embedded in the node: a rebuild
+  # (typecheck and tests included) must give the same files.
+  client-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          # The bundle is byte-compared: the bun that built the committed one.
+          bun-version: 1.4.4
+      - uses: taiki-e/install-action@just
+      - name: Client
+        run: just client-check
+      - name: Notices (web client)
+        run: tools/notices.sh --check client
+
+  # What an Apple client links (all but the CLI), as `just check-apple`
+  # checks it: clippy for iOS (device, simulator), a check for visionOS
+  # with its nightly (-Zbuild-std).
+  check-apple:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Toolchain
+        run: rustup toolchain install && rustup show active-toolchain
+      - uses: taiki-e/install-action@just
+      - uses: Swatinem/rust-cache@v2
+      # llama.cpp (stitch-llama) is built once per configuration into
+      # ~/.cache/stitch/llama, outside target/ (which rust-cache keeps
+      # only for dependencies): cached by its commit and build script.
+      - name: llama.cpp's commit
+        id: llama
+        run: echo "rev=$(git rev-parse HEAD:crates/stitch-llama/llama.cpp)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/stitch/llama
+          key: llama-${{ runner.os }}-${{ github.job }}-${{ steps.llama.outputs.rev }}-${{ hashFiles('crates/stitch-llama/build.rs') }}
+      - name: check-apple
+        run: just check-apple

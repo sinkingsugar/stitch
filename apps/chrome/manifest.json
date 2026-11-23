@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Stitch",
+  "version": "0.1.0",
+  "description": "Lets your Stitch agents work in tabs of their own in this Chrome profile, beside you: Stop, Take over and Hand back on every agent tab.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxTKX/JBbBKI4A7pGcOYzXhN+P02pns9z+d9+xYhPwmwFM9jE4FJYG747lrbfLrw7Tu8ESnyc2VMm2bbQiHKedf9QSII4NaFyesNARnyYyxwq0eoeGPcw5GnK8ltZH0pZBtp/k3A4bq3hn5ZC6g3waV9mS3T9b1Lofge6x9JpTCNTc3bzF1+7UUBmzJNvuPov4e8Ry3WlM7kb5tILJyjcmywgKcu+WISeWlnqvMH2g7lHNEqRqUjUu7ZMFi3tpFhTuVgVJLDNA1v/bwD6T78xay+OCtC6suygepVAT01PVi0wCvcamOXy+KtaP1vjncUlCThgMDH2BimTe+60k8VtBQIDAQAB",
+  "minimum_chrome_version": "120",
+  "permissions": ["debugger", "tabs", "tabGroups", "nativeMessaging", "storage", "idle", "contextMenus", "downloads", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "sw.js" },
+  "action": { "default_title": "Stitch", "default_popup": "popup.html" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_start", "all_frames": true, "match_about_blank": true }
+  ]
+}

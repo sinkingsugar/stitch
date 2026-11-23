@@ -1,0 +1,146 @@
+// youtube_video: a YouTube video's details, its transcript (timestamped
+// captions) and its top comments, from YouTube's own innertube API, as the
+// Android app and the website ask it (no key). A port of edge talk's
+// youtube-captions tool; youtube.otr says what was learned there.
+
+@include("youtube.otr")
+
+// The player's answer for a video, as the ANDROID app, else as the embedded
+// TV player; none when neither gives one that plays.
+@fn(Player input: String output: Any params: {} {
+  = video-id
+  "" | Var(player)
+  [
+    {
+      context: {client: {
+        hl: "en" gl: "US" "clientName": "ANDROID" "clientVersion": @android-version
+        "androidSdkVersion": 34 "userAgent": @android-agent
+      }}
+      "videoId": video-id "contentCheckOk": true "racyCheckOk": true
+    }
+    {
+      context: {
+        client: {hl: "en" gl: "US" "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER" "clientVersion": "2.0"}
+        "thirdParty": {"embedUrl": "https://www.youtube.com/"}
+      }
+      "videoId": video-id "contentCheckOk": true "racyCheckOk": true
+    }
+  ] = asks
+  asks | ForEach(ask {
+    player | When({Is("")} {
+      Maybe({
+        ask | ToJson | Http.Post("https://www.youtube.com/youtubei/v1/player" headers: {
+          content-type: "application/json"
+          user-agent: @android-agent
+          accept-language: "en-US,en;q=0.9"
+        } timeout: 30) = text
+        text | FromJson | .videoDetails.title? | ExpectString(default: "") | When({IsNot("")} {
+          text | Update(player)
+        })
+      } {= reason  f"youtube: the player failed: {reason}" | Log} error: true silent: true)
+    })
+  })
+  player | If({Is("")} {none} {player | FromJson})
+})
+
+// A `/next` request as the website, its answer parsed.
+@fn(Next input: {} output: Any params: {} {
+  = body
+  body | ToJson | Http.Post("https://www.youtube.com/youtubei/v1/next" headers: {
+    content-type: "application/json"
+    user-agent: @web-agent
+    accept-language: "en-US,en;q=0.9"
+    origin: "https://www.youtube.com"
+    referer: "https://www.youtube.com/"
+  } timeout: 30) | FromJson
+})
+
+@fn(Video input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input = args
+  args.video | ExpectString(default: "") | VideoId = video-id
+  video-id | When({Is("")} {"video is required: a YouTube video's ID or URL" | Fail})
+  args.language | ExpectString(default: "en") = lang
+  args.omit_captions | ExpectBool(default: false) = omit-captions
+  args.omit_comments | ExpectBool(default: false) = omit-comments
+  args.from_seconds | ExpectInt(default: 0) | Max(0) = from
+  args.max_chars | ExpectInt(default: 60000) | Max(1000) | Min(400000) = max-chars
+  args.max_comments | ExpectInt(default: 10) | Max(1) | Min(20) = max-comments
+
+  video-id | Player = player
+  player | When({IsNone} {
+    f"YouTube gave no details for video {video-id}: it may be private, removed, age-restricted or not a video ID; or YouTube refused the requests (the node's log says why)." | Fail
+  })
+  player.videoDetails? = details
+  details.lengthSeconds? | ExpectString(default: "0") | ParseInt = secs
+  details.viewCount? | ExpectString(default: "?") = views
+  [] | Var(out)
+  [
+    "Title: " (details.title? | ExpectString(default: "?")) "\n"
+    "Channel: " (details.author? | ExpectString(default: "?")) "\n"
+    "Length: " (secs | Clock) ", views: " views "\n"
+    "URL: https://www.youtube.com/watch?v=" video-id "\n\n"
+    "Description:\n" (details.shortDescription? | ExpectString(default: "")) "\n"
+  ] | String.Join | Push(out)
+
+  omit-captions | When({Not} {
+    player | Tracks = tracks
+    tracks | PickTrack(lang: lang) = picked
+    picked.url | If({Is("")} {
+      tracks | Map({.code}) = codes
+      codes | Count | If({Is(0)} {"\nTranscript: this video has no captions.\n"} {
+        f"\nTranscript: none in {lang}; the video has captions in {codes | String.Join(", ")}.\n"
+      }) | Push(out)
+    } {
+      Maybe({
+        Http.Get([picked.url "&fmt=json3"] | String.Join headers: {
+          user-agent: @android-agent
+          accept-language: "en-US,en;q=0.9"
+        } timeout: 30 retry: 2 backoff: 2) | FromJson | Transcript(from: from max-chars: max-chars) = transcript
+        from | If({IsMore(0)} {f" from {from | Clock}"} {""}) = from-text
+        picked.other | If({Is(true)} {f"; none in {lang}, so in the video's own"} {""}) = other-text
+        f"\nTranscript ({picked.about}{other-text}){from-text}:\n" | Push(out)
+        transcript.text | If({Is("")} {"(empty)\n"} {transcript.text}) | Push(out)
+        transcript.cut-at | When({IsNot(-1)} {
+          f"[cut at {transcript.cut-at | Clock} after {max-chars} characters: call again with from_seconds: {transcript.cut-at} for the rest]\n" | Push(out)
+        })
+      } {= reason  f"\nTranscript: the captions could not be read ({reason | Slice(to: 200)}); YouTube may be limiting requests: try again in a minute.\n" | Push(out)} error: true silent: true)
+    })
+  })
+
+  omit-comments | When({Not} {
+    Maybe({
+      {context: {client: {hl: "en" "clientName": "WEB" "clientVersion": @web-version}} "videoId": video-id}
+      | Next | CommentsToken = token
+      token | If({Is("")} {"\nComments: none (turned off, or none yet).\n" | Push(out)} {
+        {context: {client: {hl: "en" "clientName": "WEB" "clientVersion": @web-version}} continuation: token}
+        | Next | Comments(max: max-comments) = comments
+        comments | String.Join("\n\n") = joined
+        comments | Count | If({Is(0)} {"\nComments: none.\n"} {
+          f"\nTop comments:\n{joined}\n"
+        }) | Push(out)
+      })
+    } {= reason  f"\nComments: could not be read ({reason | Slice(to: 200)}).\n" | Push(out)} error: true silent: true)
+  })
+  out | String.Join
+})
+
+{
+  definition: {
+    name: "youtube_video"
+    description: "A YouTube video's details (title, channel, length, views, description), its transcript (timestamped captions, in the language asked for when it has them, else in the video's own) and its top comments. Takes a video ID or any YouTube URL. Long transcripts are cut at max_chars, with where to continue (from_seconds)."
+    parameters: {
+      type: "object"
+      properties: {
+        video: {type: "string" description: "The video: its ID (dQw4w9WgXcQ) or a URL (youtube.com/watch?v=…, youtu.be/…, shorts/…, embed/…, live/…)."}
+        language: {type: "string" description: "The transcript's language code, e.g. en, es, ja. Default en."}
+        omit_captions: {type: "boolean" description: "Skip the transcript: the details and comments only."}
+        omit_comments: {type: "boolean" description: "Skip the comments."}
+        from_seconds: {type: "integer" description: "The transcript from this second on (to continue a cut one, or read one part). Default 0."}
+        max_chars: {type: "integer" description: "The most characters of transcript, 1000 to 400000. Default 60000 (about an hour of speech)."}
+        max_comments: {type: "integer" description: "How many top comments, 1 to 20. Default 10."}
+      }
+      required: ["video"]
+    }
+  }
+  use: "Video"
+}

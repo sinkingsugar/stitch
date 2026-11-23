@@ -1,0 +1,157 @@
+// Shared by the YouTube tool (video.otr): defensive reads of YouTube's
+// JSON, the video ID from a URL, the caption track to read, and how a
+// transcript and comments are written. It computes only; the requests are
+// video.otr's.
+//
+// Ported from edge talk's youtube-captions tool (Shards 1.x). Lessons kept:
+// - the player is asked as the ANDROID app (innertube `/player`): the web
+//   page's caption URLs need a proof-of-origin token (`exp=xpe`) and come
+//   back empty without one, the app's do not; the embedded TV player is the
+//   fallback;
+// - captions are read as json3 (`&fmt=json3`), with the app's user agent;
+// - comments come from the WEB client's `/next`: the comment section's
+//   continuation token, then its first page (`frameworkUpdates` mutations).
+
+@const(android-version "20.10.38")
+@const(android-agent "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip")
+@const(web-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+@const(web-version "2.20250301.00.00")
+
+// --- defensive reads ---
+// A lenient path (`v.runs?`, `.captions.playerCaptionsTracklistRenderer?`)
+// reads YouTube's JSON, or none when a step cannot apply (not a table, no
+// such key, too short); `Expect*(default:)` gives it a type.
+
+// YouTube's text objects: `{simpleText}` or `{runs: [{text}]}`.
+@fn(Text input: Any output: String params: {} {
+  = v
+  v.simpleText? | ExpectString(default: "") = simple
+  simple | If({Is("")} {
+    v.runs? | ExpectSeq(default: []) | Map({.text? | ExpectString(default: "")}) | String.Join
+  } {simple})
+})
+
+// --- the video ---
+
+// A video's ID: an ID as it is, or the one a URL names (watch?v=,
+// youtu.be/, shorts/, embed/, live/).
+@fn(VideoId input: String output: String params: {} {
+  String.Trim = text
+  text | Var(id)
+  ["v=" "youtu.be/" "/shorts/" "/embed/" "/live/"] | ForEach(marker {
+    text | String.Split(marker) = parts
+    parts | Count | When({IsMore(1)} {
+      parts.1 | String.Split("&") | .0 | String.Split("?") | .0
+      | String.Split("#") | .0 | String.Split("/") | .0 | Update(id)
+    })
+  })
+  id
+})
+
+// Seconds as `m:ss`, or `h:mm:ss` past an hour.
+@fn(Clock input: Int output: String params: {} {
+  = secs
+  secs | Div(3600) = h
+  secs | Mod(3600) | Div(60) = m
+  secs | Mod(60) | ToString | String.PadStart(width: 2 with: "0") = s
+  h | If({IsMore(0)} {
+    f"{h}:{m | ToString | String.PadStart(width: 2 with: "0")}:{s}"
+  } {f"{m}:{s}"})
+})
+
+// The player's caption tracks, those with a URL.
+@fn(Tracks input: Any output: [{code: String name: String auto: Bool url: String}] params: {} {
+  .captions.playerCaptionsTracklistRenderer.captionTracks? | ExpectSeq(default: [])
+  | Filter({.baseUrl? | ExpectString(default: "") | IsNot("")})
+  | Map(t {
+    {
+      code: (t.languageCode? | ExpectString(default: "?"))
+      name: (t.name? | Text)
+      auto: (t.kind? | ExpectString(default: "") | Is("asr"))
+      url: (t.baseUrl? | ExpectString(default: "") | String.Split("&fmt=") | .0)
+    }
+  })
+})
+
+// The URL of the captions to read in `lang`, and what they are: a track in
+// that language (written by people before automatic ones), else one whose
+// code starts with it or it with the track's (`en` and `en-US`), else the
+// first track in another language (`other` true); `url` "" when there are
+// none. YouTube's own translations (`&tlang=`) are not asked for: without
+// a session they answer 429.
+@fn(PickTrack input: [{code: String name: String auto: Bool url: String}] output: {url: String about: String other: Bool} params: {lang: String} {
+  = tracks
+  lang | String.ToLower = want
+  f"{want}-" = want-prefix
+  "" | Var(url)
+  "" | Var(about)
+  // Rank: 0 exact by people, 1 exact automatic, 2 related by people,
+  // 3 related automatic, 4 another language by people, 5 automatic; the
+  // first of the best rank wins.
+  9 | Var(best)
+  tracks | ForEach({
+    = {code: t-code name: t-name url: t-url auto: t-auto}
+    t-code | String.ToLower = code
+    f"{code}-" = code-prefix
+    t-auto | If({Is(true)} {1} {0}) = extra
+    code | If({Is(want)} {0} {
+      Any({code | String.Starts(want-prefix)} {want | String.Starts(code-prefix)}) | If({Is(true)} {2} {4})
+    }) | Math.Add(extra) = rank
+    rank | When({IsLess(best)} {
+      rank | Update(best)
+      t-url | Update(url)
+      t-auto | If({Is(true)} {", automatic"} {""}) = kind
+      t-name | If({String.Contains("auto")} {""} {kind}) = kind-text
+      f"{t-name} ({t-code}{kind-text})" | Update(about)
+    })
+  })
+  {url: url about: about other: (best | IsMoreEqual(4))}
+})
+
+// json3 captions as timestamped lines from `from` seconds on, at most
+// `max-chars` characters; `cut-at` is the second where it stopped (-1: it
+// did not).
+@fn(Transcript input: Any output: {text: String cut-at: Int} params: {from: Int max-chars: Int} {
+  "" | Var(text)
+  -1 | Var(cut-at)
+  input.events? | ExpectSeq(default: []) | ForEach(event {
+    cut-at | When({Is(-1)} {
+      event.tStartMs? | ExpectInt(default: 0) | Div(1000) = at
+      event.segs? | ExpectSeq(default: []) | Map({.utf8? | ExpectString(default: "")}) | String.Join
+      | String.Replace("\n" " ") | String.Trim = said
+      All({said | IsNot("")} {at | IsMoreEqual(from)}) | When({Is(true)} {
+        f"[{at | Clock}] {said}\n" = row
+        text | Count | Math.Add(row | Count) | If({IsMore(max-chars)} {
+          at | Update(cut-at)
+        } {row | AppendTo(text)})
+      })
+    })
+  })
+  {text: text cut-at: cut-at}
+})
+
+// The comment section's continuation token in a `/next` answer, or "".
+@fn(CommentsToken input: Any output: String params: {} {
+  .contents.twoColumnWatchNextResults.results.results.contents? | ExpectSeq(default: [])
+  | Reduce(token section {
+    section.itemSectionRenderer? = isr
+    isr.sectionIdentifier? | ExpectString(default: "") | If({Is("comment-item-section")} {
+      isr.contents.0.continuationItemRenderer.continuationEndpoint.continuationCommand.token?
+      | ExpectString(default: "")
+    } {token})
+  } init: "")
+})
+
+// The first `max` comments of a comments page, as `author: text` lines.
+@fn(Comments input: Any output: [String] params: {max: Int} {
+  .frameworkUpdates.entityBatchUpdate.mutations? | ExpectSeq(default: [])
+  | Map({
+    .payload.commentEntityPayload? = cep
+    cep.properties.content.content? | ExpectString(default: "") = said
+    cep.author.displayName? | ExpectString(default: "?") = who
+    cep.toolbar.likeCountNotliked? | ExpectString(default: "") | String.Trim = likes
+    likes | If({Any({Is("")} {Is("0")})} {""} {f" ({likes} likes)"}) = likes-text
+    said | If({Is("")} {""} {f"{who}{likes-text}: {said}"})
+  })
+  | Filter({IsNot("")}) | Slice(to: max)
+})

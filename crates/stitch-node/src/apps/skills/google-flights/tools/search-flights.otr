@@ -1,0 +1,157 @@
+// Google Flights search through the public website's HTML search page: a
+// tool a host loads at run time (otter_lang::Tool, docs/embedding.md §6).
+//
+// Google's JSON RPC (batchexecute, FlightsFrontendService) is blocked for
+// cookieless callers from most IPs, so this drives the route a browser
+// takes: it builds the `tfs` protobuf itinerary token (byte for byte what
+// the fast-flights project builds), GETs /travel/flights/search?tfs=..., and
+// reads the flight data Google embeds in the page's `ds:1` script block.
+// Lessons kept from the 1.x tool:
+// - the HTML page, not batchexecute;
+// - one request at a time: concurrent requests multiplexed over one HTTP/2
+//   connection get degraded pages with no flight rows;
+// - a degraded page (ds:1 with no rows) is retried a couple of times, then
+//   the call fails with a clear message.
+// The layout is positional and undocumented, so parsing is defensive: a
+// malformed row is skipped, not fatal. No API key.
+
+@include("flights.otr")
+
+// --- the tool ---
+
+@fn(SearchFlights input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.input = args
+  args.from | ExpectString(default: "") | String.ToUpper = from
+  args.to | ExpectString(default: "") | String.ToUpper = to
+  args.date | ExpectString(default: "") = date
+  All({from | IsNot("")} {to | IsNot("")} {date | IsNot("")}) | When({Not} {
+    "from, to and date are required" | Fail
+  })
+  args.return-date | ExpectString(default: "") = return-date
+  return-date | IsNot("") = round-trip
+  round-trip | If({Is(true)} {1} {2}) = trip-type
+  // Google takes at most 9 passengers per search.
+  args.adults | ExpectInt(default: 1) | Max(1) | Min(9) = adults
+  9 | Sub(adults) = seats-left
+  args.children | ExpectInt(default: 0) | Max(0) | Min(seats-left) = children
+  args.currency | ExpectString(default: "USD") | String.ToUpper = currency
+  args.seat | ExpectString(default: "economy") | Match([
+    "economy" {1}
+    "premium-economy" {2}
+    "business" {3}
+    "first" {4}
+  ] default: {1}) = seat
+  // -1: any number of stops; else at most this many (filtered here).
+  args.max-stops | ExpectInt(default: -1) = max-stops
+  args.sort | ExpectString(default: "best") = sort-mode
+
+  // The tfs itinerary token.
+  [] | Var(info)
+  PbMsg(field: 3 body: PbLeg(date: date from: from to: to)) | Push(info)
+  round-trip | When({Is(true)} {
+    PbMsg(field: 3 body: PbLeg(date: return-date from: to to: from)) | Push(info)
+  })
+  [] | Var(passengers)
+  Repeat({1 | ToLEB128 | Push(passengers)} times: adults)
+  Repeat({2 | ToLEB128 | Push(passengers)} times: children)
+  PbMsg(field: 8 body: (passengers | Bytes.Join)) | Push(info)
+  PbVarint(field: 9 value: seat) | Push(info)
+  PbVarint(field: 19 value: trip-type) | Push(info)
+  info | Bytes.Join | SearchUrl(currency: currency) = url
+
+  // A degraded page (no rows) is retried twice, then the call fails.
+  url | FetchFlights(tries: 3) = data
+  data | When({IsNone} {
+    "Google Flights returned no usable data: either the requests failed (the log says so; an `otter` built without TLS cannot fetch https) or Google is rate-limiting them, in which case try again in a minute or two." | Fail
+  })
+
+  [] | Var(lines)
+  round-trip | If({Is(true)} {
+    f"Round-trip {from} -> {to} departing {date}, returning {return-date} (prices in {currency} are round-trip totals; the outbound options are listed, pick the return leg via the link)\n"
+  } {
+    f"One-way {from} -> {to} on {date} (prices in {currency})\n"
+  }) | Push(lines)
+  adults | Add(children) | When({IsMore(1)} {
+    f"{adults} adult(s), {children} child(ren)\n" | Push(lines)
+  })
+
+  // Flight rows are data[3][0]; order them as asked (stable).
+  data.3.0? | ExpectSeq(default: []) = rows
+  rows | Map(row i {
+    sort-mode | Match([
+      "cheapest" {row | Price}
+      "duration" {row.0.9? | ExpectInt(default: @no-price)}
+    ] default: {i}) = key
+    [key i]
+  }) | Sort = order
+
+  0 | Var(shown)
+  order | ForEach({
+    = [_ index]
+    Maybe({
+      rows | Take(index) = row
+      row.0? = detail
+      detail.2? | ExpectSeq(default: []) = legs
+      legs | Count | Sub(1) | Max(0) = stops
+      All({shown | IsLess(12)} {legs | Count | IsMore(0)} {Any({max-stops | Is(-1)} {stops | IsLessEqual(max-stops)})}) | When({Is(true)} {
+        row | Price = price
+        price | If({Is(@no-price)} {"n/a"} {price | ToString}) = price-text
+        detail.9? | ExpectInt(default: 0) = total
+        stops | If({Is(0)} {"nonstop"} {f"{stops} stop(s)"}) = stops-text
+        Inc(shown)
+        f"\n{shown}. {price-text} {currency} - {total | FmtMins} - {stops-text}\n" | Push(lines)
+
+        legs | ForEach(leg {
+          leg.3? | ExpectString(default: "?") = leg-from
+          leg.6? | ExpectString(default: "?") = leg-to
+          leg.22.0? | ExpectString(default: "") = airline-code
+          leg.22.1? | ExpectString(default: "") = flight-number
+          leg.22.3? | ExpectString(default: "") = airline-name
+          leg.17? | ExpectString(default: "") = aircraft
+          leg.11? | ExpectInt(default: 0) = leg-mins
+          leg.20? | FmtDateTime(time: leg.8?) = departs
+          leg.21? | FmtDateTime(time: leg.10?) = arrives
+          aircraft | If({Is("")} {""} {f", {aircraft}"}) = aircraft-text
+          f"   {airline-code} {flight-number} ({airline-name}): {leg-from} {departs} -> {leg-to} {arrives} [{leg-mins | FmtMins}{aircraft-text}]\n" | Push(lines)
+        })
+
+        // Layovers, detail[13]: [minutes IATA IATA none airport-name city ...].
+        detail.13? | ExpectSeq(default: []) | ForEach(layover {
+          layover.0? | ExpectInt(default: 0) = layover-mins
+          layover.1? | ExpectString(default: "?") = layover-code
+          layover.4? | ExpectString(default: "") = layover-name
+          layover-name | If({Is("")} {""} {f" ({layover-name})"}) = layover-name-text
+          f"   layover: {layover-mins | FmtMins} at {layover-code}{layover-name-text}\n" | Push(lines)
+        })
+      })
+    } {Log("google-flights: skipped a malformed flight row")})
+  })
+
+  shown | When({Is(0)} {"\nNo matching flights found for this route and date.\n" | Push(lines)})
+  f"\nBook / see more: {url}\n" | Push(lines)
+  lines | String.Join
+})
+
+{
+  definition: {
+    name: "google_flights_search"
+    description: "Search Google Flights for one-way or round-trip flights between two airports on given dates. Returns prices, airlines, flight numbers, times, durations, stops and layovers, plus a booking link. Uses the public Google Flights website (no API key)."
+    parameters: {
+      type: "object"
+      properties: {
+        from: {type: "string" description: "Departure airport IATA code, e.g. KIX. No spaces."}
+        to: {type: "string" description: "Arrival airport IATA code, e.g. NRT. No spaces."}
+        date: {type: "string" description: "Departure date in YYYY-MM-DD format."}
+        return-date: {type: "string" description: "Optional return date in YYYY-MM-DD format. When set, the search becomes a round trip: prices are round-trip totals and the listed options are the outbound legs."}
+        adults: {type: "integer" description: "Number of adult passengers, 1 to 9. Default 1."}
+        children: {type: "integer" description: "Number of child passengers; adults and children together are at most 9. Default 0."}
+        seat: {type: "string" description: "Cabin class: economy, premium-economy, business or first. Default economy."}
+        max-stops: {type: "integer" description: "Maximum number of stops: 0 = nonstop only, 1, or 2. Omit for any."}
+        sort: {type: "string" description: "Result ordering: best (default, Google's ranking), cheapest, or duration."}
+        currency: {type: "string" description: "ISO 4217 currency code for prices, e.g. USD, EUR, JPY. Default USD."}
+      }
+      required: ["from" "to" "date"]
+    }
+  }
+  use: "SearchFlights"
+}

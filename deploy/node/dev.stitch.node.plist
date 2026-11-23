@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The Stitch node as a LaunchAgent, written by `stitch node service
+     install` to ~/Library/LaunchAgents/<label>.plist from this template.
+     KeepAlive with SuccessfulExit false: started again when it exits with
+     an error, or with 75, a restart it asked for (a new build installed,
+     `stitch node restart`); a plain stop stays stopped. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@EXE@</string>
+    <string>--data</string>
+    <string>@DATA@</string>
+    <string>node</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@PATH@</string>
+    <key>SHELL</key><string>@SHELL@</string>
+    <key>STITCH_SUPERVISED</key><string>1</string>
+  </dict>
+  <key>WorkingDirectory</key><string>@HOME@</string>
+  <key>StandardOutPath</key><string>@LOG@</string>
+  <key>StandardErrorPath</key><string>@LOG@</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

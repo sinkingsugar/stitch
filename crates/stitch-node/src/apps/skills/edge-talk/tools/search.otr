@@ -1,0 +1,84 @@
+// edge_talk_search: full-text search over edge talk's messages (its FTS5
+// index, bm25-ranked), each hit with its conversation, date, sender and a
+// snippet. All the words must match; when none does and there are several,
+// any of them (most matching first).
+
+@include("edge-talk.otr")
+
+// The hits, best first; the snippet is cut around the first word's first
+// literal occurrence (the index is stemmed, so it may have none: then from
+// the start).
+@const(search-sql "WITH hits AS (
+  SELECT m.id AS id, bm25(messages_fts) AS score
+  FROM messages_fts JOIN messages m ON m.id = messages_fts.id
+  WHERE messages_fts MATCH :match
+    AND m.conversation_id IS NOT NULL
+    AND substr(m.created_at, 1, 10) BETWEEN :from AND :to
+  ORDER BY score LIMIT :limit
+)
+SELECT m.conversation_id AS cid, c.title AS title, substr(m.created_at, 1, 16) AS at,
+  m.sender AS sender, length(m.message) AS len,
+  max(1, instr(lower(m.message), lower(:first)) - 80) AS start,
+  substr(m.message, max(1, instr(lower(m.message), lower(:first)) - 80), 280) AS snippet
+FROM hits h JOIN messages m ON m.id = h.id
+LEFT JOIN conversations c ON c.id = m.conversation_id
+ORDER BY h.score")
+
+@fn(Search input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input | DbPath = db
+  input.input = args
+  args.query | ExpectString(default: "") | String.Trim = query
+  query | Terms = terms
+  terms | Count | When({Is(0)} {"query is required: the words to look for" | Fail})
+  args.from | DayOr(default: "0000-00-00" name: "from") = from
+  args.to | DayOr(default: "9999-99-99" name: "to") = to
+  args.limit | ExpectInt(default: 15) | Max(1) | Min(50) = limit
+  terms | Take(0) = first
+  @search-sql = sql
+
+  {match: (terms | FtsMatch(any: false)) from: from to: to limit: limit first: first}
+  Db.Query(sql db max-rows: 50) | Var(rows)
+  "" | Var(how)
+  All({rows | Count | Is(0)} {terms | Count | IsMore(1)}) | When({Is(true)} {
+    {match: (terms | FtsMatch(any: true)) from: from to: to limit: limit first: first}
+    Db.Query(sql db max-rows: 50) | Update(rows)
+    " (no message has them all: any of them, most first)" | Update(how)
+  })
+
+  rows | Count = n
+  [] | Var(lines)
+  n | If({Is(0)} {
+    f"No edge talk message matches \"{query}\"" | Push(lines)
+  } {
+    f"{n} edge talk messages matching \"{query}\"{how}, best first; edge_talk_read reads a conversation by its id:" | Push(lines)
+  })
+  rows | ForEach(row {
+    row.start | ExpectInt(default: 1) = start
+    row.len | ExpectInt(default: 0) = len
+    start | If({IsMore(1)} {"…"} {""}) = before
+    start | Add(279) | If({IsLess(len)} {"…"} {""}) = after
+    row.sender | ExpectString(default: "?") = sender
+    row.at | ExpectString(default: "") = at
+    row.cid | ExpectString(default: "") = cid
+    f"- {at} [{cid}] {row.title | Title}\n  {sender}: {before}{row.snippet | OneLine}{after}" | Push(lines)
+  })
+  lines | String.Join("\n")
+})
+
+{
+  definition: {
+    name: "edge_talk_search"
+    description: "Full-text search over the user's edge talk chats (the app they used before Stitch): messages matching the words, best first, each with its conversation's id and title, date, sender and a snippet. Words match by stem and prefix; all must match, else any. Short messages (a user's under 50 characters, an assistant's under 200) and tool rows are not indexed: use edge_talk_conversations for titles."
+    parameters: {
+      type: "object"
+      properties: {
+        query: {type: "string" description: "The words to look for (punctuation and operators are ignored)."}
+        from: {type: "string" description: "Only messages from this day on, YYYY-MM-DD."}
+        to: {type: "string" description: "Only messages up to this day, YYYY-MM-DD (included)."}
+        limit: {type: "integer" description: "How many hits, 1 to 50. Default 15."}
+      }
+      required: ["query"]
+    }
+  }
+  use: "Search"
+}

@@ -1,0 +1,174 @@
+<!doctype html>
+<!-- leadsheet player app template.
+     Copy this file as index.html of the song's app directory (e.g.
+     apps/mysong/index.html), replace ONLY the contents of the ls-src block
+     below with the song, then show it: show_app with that directory.
+     Fully offline: compiler wasm, SpessaSynth, and the GM soundfont are
+     bundled with Stitch and load through window.initLeadsheet()
+     (/_lib/leadsheet.js). -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/_stitch/stitch.css">
+<script src="/_lib/leadsheet.js"></script>
+
+<script type="text/plain" id="ls-src">
+song: demo  tempo: 96.00  meter: 4/4  key: Am  grid: 1/16
+instruments: bass:33 drums:kit piano:0 lead:81
+
+P1 bass   | A,,4 A,,4 G,,4 E,,4 |
+P2 drums
+  K |x... .... x.x. ....|
+  S |.... x... .... x...|
+  h |x.x. x.x. x.x. x.x.|
+P3 piano* | Am . F G7 |
+P4 lead   | e2 c2 d2 B2 c4 A4 |
+
+arrangement:
+  intro: [P1+P2] x2
+  A:     [P1+P2+P3+P4] x4
+</script>
+
+<div class="lsp">
+  <div class="lsp-head">
+    <span class="lsp-title" id="lsp-title">…</span>
+    <span class="lsp-status" id="lsp-check">loading engine…</span>
+  </div>
+  <div class="lsp-row">
+    <button id="lsp-play" class="lsp-primary" disabled>&#9654; play</button>
+    <button id="lsp-pause" disabled>&#9208;</button>
+    <input id="lsp-seek" type="range" min="0" max="1000" value="0" disabled>
+    <span class="lsp-time" id="lsp-time">0:00 / 0:00</span>
+  </div>
+  <div class="lsp-row lsp-foot">
+    <button id="lsp-dl-mid" disabled>.mid &#8595;</button>
+    <button id="lsp-dl-ls">.ls &#8595;</button>
+    <span class="lsp-chip" id="lsp-sf"></span>
+  </div>
+  <details class="lsp-src"><summary>source</summary><pre id="lsp-view"></pre></details>
+</div>
+
+<style>
+  .lsp { font-family: -apple-system, system-ui, sans-serif; border: 1px solid rgba(128,128,128,.35); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .lsp-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .lsp-title { font-weight: 700; }
+  .lsp-status { font-size: 12px; opacity: .8; }
+  .lsp-status.ok { color: #2e9e5b; }
+  .lsp-status.err { color: #d44343; }
+  .lsp-row { display: flex; align-items: center; gap: 8px; }
+  .lsp button { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 8px; border: 1px solid rgba(128,128,128,.4); background: transparent; color: inherit; cursor: pointer; }
+  .lsp button:disabled { opacity: .45; cursor: default; }
+  .lsp .lsp-primary { font-weight: 600; }
+  .lsp input[type=range] { flex: 1; min-width: 60px; }
+  .lsp-time { font-variant-numeric: tabular-nums; font-size: 12px; opacity: .8; white-space: nowrap; }
+  .lsp-chip { font-size: 11px; opacity: .65; }
+  .lsp-src summary { font-size: 12px; opacity: .7; cursor: pointer; }
+  .lsp-src pre { font-size: 11px; line-height: 1.45; overflow-x: auto; margin: 6px 0 0; }
+</style>
+
+<script>
+(async () => {
+  const $ = (id) => document.getElementById(id);
+  const playBtn = $("lsp-play"), pauseBtn = $("lsp-pause"), seekBar = $("lsp-seek");
+  const timeEl = $("lsp-time"), sfChip = $("lsp-sf"), checkEl = $("lsp-check");
+
+  const lsText = $("ls-src").textContent.replace(/^\n/, "");
+  $("lsp-view").textContent = lsText;
+  const songName = (lsText.match(/^song:\s*(\S+)/m) || [, "song"])[1];
+  $("lsp-title").textContent = songName;
+
+  const LS = await initLeadsheet();
+
+  // ---- validate, surface diagnostics (and hand them back to the assistant) ----
+  let res;
+  try { res = JSON.parse(LS.check(lsText)); } catch (e) { res = { ok: false, error: String(e) }; }
+  if (res.ok) {
+    checkEl.className = "lsp-status ok";
+    checkEl.textContent = `✓ ${res.bars} bars · ${res.tracks} tracks · ${res.notes} notes · ${res.bpm.toFixed(2)} BPM ${res.meter[0]}/${res.meter[1]}`;
+    playBtn.disabled = false;
+    $("lsp-dl-mid").disabled = false;
+  } else {
+    checkEl.className = "lsp-status err";
+    const d = res.diagnostics?.[0];
+    checkEl.textContent = d
+      ? `✗ line ${d.line}${d.col ? ":" + d.col : ""} ${d.message} [${d.code}]` + (d.suggestion ? ` — ${d.suggestion}` : "")
+      : `✗ ${res.error}`;
+    // Close the compose loop: report diagnostics so the assistant can fix the song.
+    try { await window.embedAPI?.report(JSON.stringify({ leadsheet_check_failed: songName, result: res })); } catch {}
+  }
+
+  // ---- synth / sequencer (bundled SpessaSynth + GM soundfont) ----
+  let ctx = null, synth = null, seq = null;
+  function unlock() { // synchronously inside the tap, before any await (Safari)
+    if (!ctx) ctx = new AudioContext();
+    if (ctx.state === "suspended") ctx.resume();
+  }
+  async function ensureSynth() {
+    if (synth) return;
+    sfChip.textContent = "loading synth…";
+    synth = await LS.createSynth(ctx);
+    sfChip.textContent = "GeneralUser GS";
+  }
+  async function playBytes(bytes) {
+    await ctx.resume();
+    if (!seq) { seq = new LS.Sequencer(synth, { skipToFirstNoteOn: false }); seq.loopCount = 0; }
+    const binary = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    seq.loadNewSongList([{ binary, fileName: `${songName}.mid` }]);
+    seq.loopCount = 0;
+    seq.play();
+    seq.currentTime = 0; // re-anchor after the synth setup delay
+  }
+
+  // ---- transport ----
+  const fmtTime = (s) => { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
+  playBtn.onclick = async () => {
+    unlock();
+    let bytes;
+    try { bytes = LS.render(lsText); } catch (e) {
+      checkEl.className = "lsp-status err";
+      checkEl.textContent = `✗ render: ${e.message ?? e}`;
+      return;
+    }
+    playBtn.disabled = true;
+    try {
+      await ensureSynth();
+      await playBytes(bytes);
+      pauseBtn.disabled = false; seekBar.disabled = false; pauseBtn.textContent = "⏸";
+    } catch (e) {
+      sfChip.textContent = `audio failed: ${e.message ?? e}`;
+    } finally {
+      playBtn.disabled = false;
+    }
+  };
+  pauseBtn.onclick = () => {
+    if (!seq) return;
+    if (seq.paused) { ctx?.resume(); seq.play(); pauseBtn.textContent = "⏸"; }
+    else { seq.pause(); pauseBtn.textContent = "▶"; }
+  };
+  let seeking = false;
+  seekBar.oninput = () => { seeking = true; };
+  seekBar.onchange = () => { if (seq) seq.currentTime = (seekBar.value / 1000) * seq.duration; seeking = false; };
+  (function tick() {
+    if (seq && seq.midiData !== undefined && !seeking) {
+      const dur = seq.duration || 0;
+      const cur = Math.min(seq.currentTime, dur);
+      seekBar.value = dur ? Math.round((1000 * cur) / dur) : 0;
+      timeEl.textContent = `${fmtTime(cur)} / ${fmtTime(dur)}`;
+      if (seq.isFinished) pauseBtn.textContent = "▶";
+    }
+    requestAnimationFrame(tick);
+  })();
+
+  // ---- downloads ----
+  function download(data, filename, type) {
+    const url = URL.createObjectURL(new Blob([data], { type }));
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  $("lsp-dl-ls").onclick = () => download(lsText, `${songName}.ls`, "text/plain");
+  $("lsp-dl-mid").onclick = () => {
+    try { download(LS.render(lsText), `${songName}.mid`, "audio/midi"); }
+    catch { checkEl.textContent = "✗ render: fix the errors first"; }
+  };
+})();
+</script>

@@ -1,0 +1,116 @@
+/* The built-in dashboard (design §2.10): the client's styles (../style.css)
+   and what only the dashboard shows. The page flows and scrolls as a whole
+   (the phone's web view takes its height). */
+html, body.dashboard { height: auto; }
+body.dashboard { background: radial-gradient(1200px 500px at 15% -10%, #1d2436 0%, transparent 70%) no-repeat, var(--bg); min-height: 100vh; overflow-wrap: break-word; }
+body.dashboard #app { height: auto; display: block; }
+.dash { max-width: 1480px; margin: 0 auto; padding: 16px max(16px, env(safe-area-inset-right)) 40px max(16px, env(safe-area-inset-left)); display: flex; flex-direction: column; gap: 14px; }
+
+header.dtop { display: flex; align-items: center; gap: 12px; padding: 0; border: none; flex-wrap: nowrap; }
+.dtop .logo { width: 32px; height: 32px; border-radius: 9px; flex: none; }
+.dtop h1 { font-size: 20px; margin: 0; flex: 1; min-width: 0; letter-spacing: -.01em; }
+.dtop h1 span { background: linear-gradient(135deg, #FFC092, #FF927A 48%, #EF706D); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.live { font-size: 12px; color: var(--ink2); white-space: nowrap; padding: 3px 10px; border-radius: 99px; background: var(--panel); border: 1px solid var(--edge); }
+.live i { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--mint); margin-right: 6px; vertical-align: 1px; box-shadow: 0 0 0 3px rgba(97,197,197,.25); }
+.live.off i { background: var(--grey); box-shadow: none; }
+.dash .err { margin: 0; }
+.problem { display: flex; flex-direction: column; gap: 4px; }
+
+/* The numbers first: each one a link to its panel. */
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+/* Below 1100px the row is 12 columns split by tile count, so the last row never
+   holds a lone orphan: 5 is 3+2, 7 is 4+3, 8 is 4+4, 6 is 3+3. */
+@media (max-width: 1099px) {
+  .stats { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+  .stat { grid-column: span 4; }
+  .stat:first-child:nth-last-child(1) { grid-column: span 12; }
+  .stat:first-child:nth-last-child(2), .stat:first-child:nth-last-child(2) ~ .stat { grid-column: span 6; }
+  .stat:first-child:nth-last-child(4), .stat:first-child:nth-last-child(4) ~ .stat { grid-column: span 3; }
+  .stat:first-child:nth-last-child(5) ~ .stat:nth-child(n+4) { grid-column: span 6; }
+  .stat:first-child:nth-last-child(7), .stat:first-child:nth-last-child(7) ~ .stat:nth-child(-n+4) { grid-column: span 3; }
+  .stat:first-child:nth-last-child(8), .stat:first-child:nth-last-child(8) ~ .stat { grid-column: span 3; }
+}
+.stat { position: relative; overflow: hidden; display: flex; flex-direction: column; gap: 2px; padding: 12px 14px 10px; border-radius: 12px; background: var(--panel); border: 1px solid var(--edge); color: var(--ink); text-decoration: none; }
+.stat:hover { border-color: rgba(255,255,255,.18); }
+.stat b { font-size: 28px; line-height: 1; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 12px; color: var(--ink2); }
+.stat::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; }
+.stat.s-working b, .stat.s-sched b { color: var(--mint); } .stat.s-working::after, .stat.s-sched::after { background: linear-gradient(90deg, #61C5C5, #BAF1DC); }
+.stat.s-waiting b { color: var(--apricot); } .stat.s-waiting::after { background: linear-gradient(90deg, #FFC092, #FF927A); }
+.stat.s-failed b { color: var(--coral); } .stat.s-failed::after { background: linear-gradient(90deg, #FF927A, #EF706D); }
+.stat.s-done b { color: var(--ink); }
+.stat.quiet b { color: var(--ink2); opacity: .55; } .stat.quiet::after { display: none; }
+
+/* Two columns: what needs you and loose ends; what goes on and what is scheduled. */
+.front { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.front .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.dash .panel { min-width: 0; }
+/* `.working` is also the transcript's turn line (a flex row): a dot keeps its own box. */
+.dash .dot.working { display: inline-block; }
+.dash .phead { flex-wrap: wrap; row-gap: 4px; }
+.hint { margin-top: 4px; }
+.front .col, .front .col > *, .panel, .hrow, .ht, .meta { min-width: 0; }
+code.cmd, .tc .out code { display: inline-block; max-width: 100%; white-space: nowrap; overflow-x: auto; vertical-align: bottom; scrollbar-width: thin; }
+code.cmd { font: 11.5px var(--mono); background: rgba(255,255,255,.07); color: var(--ink); padding: 1px 6px; border-radius: 4px; }
+.tname { font-weight: 600; }
+.chip { display: inline-block; font-size: 11px; line-height: 17px; padding: 0 7px; border-radius: 6px; border: 1px solid var(--edge); color: var(--ink2); white-space: nowrap; }
+.chip.unread { margin-left: 8px; color: var(--apricot); border-color: rgba(245,160,90,.5); vertical-align: 1px; }
+.modechip { font-size: 12px; font-weight: 700; border-radius: 7px; padding: 1px 10px; background: var(--panel); border: 1px solid var(--edge); }
+.modechip.on { color: #0b2020; background: var(--mint); border-color: transparent; }
+.modechip.dry-run { color: #2b1800; background: var(--apricot); border-color: transparent; }
+
+/* Threads: a lane per conversation; a card per thread, the threads it
+   spawned hanging under it on a stitched line. */
+.dhead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 14px 2px -2px; }
+.dhead h2 { margin: 0; font-size: 14px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink2); }
+.legend { margin-left: auto; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--ink2); }
+.legend .dot, .counts .dot { margin: 0 5px 0 0; vertical-align: 0; }
+.lanes { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+.lane { flex: 1 1 auto; min-width: 0; background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; padding: 12px 14px; }
+.lane-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin-bottom: 10px; }
+.lane-h b { font-size: 14.5px; }
+.counts { margin-left: auto; display: flex; gap: 10px; font-size: 12px; color: var(--ink2); font-variant-numeric: tabular-nums; }
+.cards { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-start; }
+.stack { flex: 1 1 260px; max-width: 100%; min-width: 0; display: flex; flex-direction: column; }
+.tc { background: var(--panel2); border: 1px solid var(--edge); border-left: 3px solid var(--grey); border-radius: 10px; padding: 9px 11px; cursor: pointer; }
+.tc:hover { border-color: rgba(255,255,255,.16); }
+.tc.s-working { border-left-color: var(--mint); } .tc.s-waiting { border-left-color: var(--apricot); } .tc.s-failed { border-left-color: var(--coral); }
+.tc .tl { display: flex; gap: 8px; } .tc .tl .dot { margin-top: 6px; }
+.tc .name { font-weight: 600; line-height: 1.35; }
+.tc .out { color: var(--ink2); font-size: 12.5px; margin: 3px 0 5px 17px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.tc.open .out { display: block; }
+.tc .out code { font: 11.5px var(--mono); color: var(--ink); }
+.cmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-left: 17px; font-size: 11.5px; color: var(--ink2); }
+.chip.node { color: var(--mint); border-color: rgba(97,197,197,.35); } .chip.ro { color: var(--apricot); }
+.more { margin: 8px 0 0 17px; cursor: auto; }
+.more pre { margin: 2px 0 8px; padding: 8px 10px; background: #0a0e17; border: 1px solid var(--edge); border-radius: 8px; font: 12px/1.45 var(--mono); white-space: pre-wrap; max-height: 14em; overflow: auto; }
+.more .link { margin-left: 6px; }
+.kids { margin: 0 0 0 12px; padding: 8px 0 0 12px; border-left: 2px dashed rgba(97,197,197,.35); display: flex; flex-direction: column; gap: 8px; }
+.kids .stack { flex: none; }
+.earlier { display: flex; flex-direction: column; gap: 8px; }
+details.lane.folded { padding: 8px 14px; }
+details.lane.folded > summary { list-style: none; }
+details.lane.folded > summary::-webkit-details-marker { display: none; }
+details.lane.folded .lane-h { margin: 0; }
+details.lane.folded .lane-h b::before { content: "▸ "; color: var(--ink2); }
+details.lane.folded[open] .lane-h { margin-bottom: 10px; } details.lane.folded[open] .lane-h b::before { content: "▾ "; }
+.tlwrap { margin-top: 8px; }
+
+/* One column (a phone): what needs you first, then what goes on, loose ends, the schedule. */
+@media (max-width: 860px) {
+  .front { display: flex; flex-direction: column; align-items: stretch; }
+  .front .col { display: contents; }
+  .front .o1 { order: 1; } .front .o2 { order: 2; } .front .o3 { order: 3; } .front .o4 { order: 4; }
+  .legend { margin-left: 0; }
+}
+@media (max-width: 520px) {
+  .dash { padding-top: 12px; gap: 12px; }
+  .dtop h1 { font-size: 17px; }
+  .stats { gap: 6px; }
+  .stat:first-child:nth-last-child(4), .stat:first-child:nth-last-child(4) ~ .stat { grid-column: span 6; }
+  .stat:first-child:nth-last-child(8), .stat:first-child:nth-last-child(8) ~ .stat { grid-column: span 3; }
+  .stat { padding: 8px 9px 8px; border-radius: 10px; } .stat b { font-size: 21px; } .stat span { font-size: 11px; line-height: 1.3; }
+  .lane { padding: 10px; }
+  .counts { margin-left: 0; }
+  .kids { margin-left: 6px; padding-left: 8px; }
+}

@@ -1,0 +1,90 @@
+// edge_talk_memories: the memories edge talk distilled from the user's
+// chats (its `memory` table), by full-text search (its FTS5 index,
+// bm25-ranked), or the latest without a query.
+
+@include("edge-talk.otr")
+
+@const(search-sql "WITH hits AS (
+  SELECT mem.id AS id, bm25(memory_fts) AS score
+  FROM memory_fts JOIN memory mem ON mem.id = memory_fts.id
+  WHERE memory_fts MATCH :match
+    AND substr(mem.created_at, 1, 10) BETWEEN :from AND :to
+  ORDER BY score LIMIT :limit
+)
+SELECT substr(mem.memory, 1, 600) AS text, length(mem.memory) AS len, mem.type AS type,
+  substr(mem.created_at, 1, 10) AS at, mem.conversation_id AS cid, a.name AS actor
+FROM hits h JOIN memory mem ON mem.id = h.id
+LEFT JOIN actors a ON a.id = mem.actor_id
+ORDER BY h.score")
+
+@const(latest-sql "SELECT substr(mem.memory, 1, 600) AS text, length(mem.memory) AS len,
+  mem.type AS type, substr(mem.created_at, 1, 10) AS at, mem.conversation_id AS cid,
+  a.name AS actor
+FROM memory mem LEFT JOIN actors a ON a.id = mem.actor_id
+WHERE substr(mem.created_at, 1, 10) BETWEEN :from AND :to
+ORDER BY mem.created_at DESC LIMIT :limit")
+
+@fn(Memories input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input | DbPath = db
+  input.input = args
+  args.query | ExpectString(default: "") | String.Trim = query
+  query | Terms = terms
+  args.from | DayOr(default: "0000-00-00" name: "from") = from
+  args.to | DayOr(default: "9999-99-99" name: "to") = to
+  args.limit | ExpectInt(default: 20) | Max(1) | Min(100) = limit
+  @search-sql = search-sql
+  @latest-sql = latest-sql
+
+  terms | Count = term-count
+  "" | Var(how)
+  term-count | If({Is(0)} {
+    {from: from to: to limit: limit} | Db.Query(latest-sql db max-rows: 100)
+  } {
+    {match: (terms | FtsMatch(any: false)) from: from to: to limit: limit}
+    Db.Query(search-sql db max-rows: 100)
+  }) | Var(rows)
+  All({rows | Count | Is(0)} {term-count | IsMore(1)}) | When({Is(true)} {
+    {match: (terms | FtsMatch(any: true)) from: from to: to limit: limit}
+    Db.Query(search-sql db max-rows: 100) | Update(rows)
+    " (none has all the words: any of them, most first)" | Update(how)
+  })
+
+  rows | Count = n
+  [] | Var(lines)
+  term-count | If({Is(0)} {
+    f"The {n} latest edge talk memories:"
+  } {
+    n | If({Is(0)} {f"No edge talk memory matches \"{query}\""} {
+      f"{n} edge talk memories matching \"{query}\"{how}, best first:"
+    })
+  }) | Push(lines)
+  rows | ForEach(row {
+    row.len | ExpectInt(default: 0) | If({IsMore(600)} {"…"} {""}) = after
+    row.type | ExpectString(default: "") = type
+    type | If({Is("")} {""} {f" ({type})"}) = type-text
+    row.actor | ExpectString(default: "") = actor
+    actor | If({Is("")} {""} {f", {actor}"}) = actor-text
+    row.cid | ExpectString(default: "") = cid
+    cid | If({Is("")} {""} {f" [{cid}]"}) = cid-text
+    row.at | ExpectString(default: "") = at
+    f"- {at}{type-text}{actor-text}{cid-text}: {row.text | OneLine}{after}" | Push(lines)
+  })
+  lines | String.Join("\n")
+})
+
+{
+  definition: {
+    name: "edge_talk_memories"
+    description: "The memories edge talk (the app the user used before Stitch) distilled from their chats: facts, preferences and events about the user, by full-text search, best first, or the latest without a query. Each with its date, type, persona and the conversation it came from (for edge_talk_read)."
+    parameters: {
+      type: "object"
+      properties: {
+        query: {type: "string" description: "The words to look for; omit for the latest memories."}
+        from: {type: "string" description: "Only memories from this day on, YYYY-MM-DD."}
+        to: {type: "string" description: "Only memories up to this day, YYYY-MM-DD (included)."}
+        limit: {type: "integer" description: "How many, 1 to 100. Default 20."}
+      }
+    }
+  }
+  use: "Memories"
+}

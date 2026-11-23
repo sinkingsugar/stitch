@@ -1,0 +1,34 @@
+# What a fixer of Stitch lands on main only once the user approved it
+# (docs/self-improve.md §4): `stitch issue land` asks them, showing the
+# diff of these files as the node reads it. Read from main as it is, never
+# from the fix. Ordinary work by the user's own threads is not gated.
+# One path or directory (ending in /) per line, from the repository's root.
+
+# The approval and allow rules, the fixers' mode, asking whatever yolo
+# says, the questions only the user answers.
+crates/stitch-node/src/rules.rs
+crates/stitch-node/src/fixer.rs
+# Who asks: the caller told from its process and its sandbox.
+crates/stitch-node/src/peer.rs
+# The sandbox: where shells write, and how they are confined.
+crates/stitch-node/src/sandbox.rs
+crates/stitch-shell/src/sandbox.rs
+# Self-improvement: its budgets, settings, ledger, landing; issues.
+crates/stitch-node/src/selfimprove.rs
+crates/stitch-node/src/issues.rs
+# The hazard guard and the decisions it reads: the questions, the fixers'
+# and the landing roles (what lets a fixer's command run or a protected
+# fix land unasked), the profiles, their thresholds and the settings that
+# turn them on (design §2.28–2.29).
+crates/stitch-node/src/hazard/
+crates/stitch-node/src/decide/mod.rs
+crates/stitch-node/src/decide/profiles.rs
+# Where the node runs git for fixers (landing, their pushes, CI).
+crates/stitch-node/src/mirror.rs
+crates/stitch-node/src/apps/skills/stitch-dev/
+# How nodes update (the units, the self-update; the app's deployments are
+# its repository's, with its own list) and CI checks.
+deploy/node/
+.github/
+# This list.
+tools/protected-paths

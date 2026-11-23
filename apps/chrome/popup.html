@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 0; width: 300px; color: #1d1b26; }
+  header { background: #2b1a55; color: #fff; padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; }
+  header b { font-size: 14px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; background: #999; }
+  .dot.on { background: #4cd17a; }
+  section { padding: 10px 12px; border-bottom: 1px solid #eee; }
+  label.switch { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  input[type=text] { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 4px 6px; }
+  .muted { color: #6b6880; font-size: 12px; }
+  .session { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; gap: 6px; }
+  .session span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; padding: 2px 8px; }
+</style>
+</head>
+<body>
+  <header><b>Stitch</b><span><span id="dot" class="dot"></span><span id="conn">…</span></span></header>
+  <section>
+    <label class="switch"><input type="checkbox" id="enabled"> Allow Stitch in this profile</label>
+    <input type="text" id="name" placeholder="This profile's name (e.g. work)">
+    <p class="muted">While on, Stitch's agents can open and use tabs of their own here (in a tab group), and tabs you share. They cannot see your other tabs.</p>
+  </section>
+  <section id="sessions"><span class="muted">No sessions.</span></section>
+  <section id="share" hidden>
+    <button id="shareBtn">Share this tab with Stitch</button>
+    <button id="pickBtn">Pick an element…</button>
+    <p class="muted">Or right-click anything: "Ask Stitch about this…". Your agent sees it in browser_context.</p>
+  </section>
+  <script src="popup.js"></script>
+</body>
+</html>

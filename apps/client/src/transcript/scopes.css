@@ -1,0 +1,39 @@
+/* Scopes (design §2.27): chips in the composer and on messages, the ⎇ picker, the map's tray and card row. */
+.scopechips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.scopechip { --sc: 196,166,255; display: inline-flex; align-items: center; gap: 2px; max-width: 100%; border-radius: 999px; border: 1px solid rgba(var(--sc),.35); background: rgba(var(--sc),.09); color: #dcd0ff; font-size: 12.5px; line-height: 1.3; }
+.scopechip.thread { --sc: 140,180,235; color: #cfe0f8; }
+.scopechip > .lab, .scopechip > .sym { padding: 3px 0; }
+.scopechip > .sym { padding-left: 10px; opacity: .8; }
+.scopechip .lab { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34ch; }
+.scopechip button { background: none; border: 0; color: inherit; font-size: inherit; border-radius: 999px; }
+.scopechip button.go { padding: 3px 10px; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.scopechip button.go .sym { opacity: .8; }
+.scopechip button.rm { padding: 3px 8px 3px 4px; opacity: .7; font-size: 11px; }
+.scopechip button:hover, .scopechip button:focus-visible { background: rgba(var(--sc),.18); opacity: 1; }
+.scopechip button:focus-visible { outline: 2px solid rgba(var(--sc),.8); outline-offset: -2px; }
+.msg.user .scopechips.sent { margin: 0 0 6px; }
+.scopepick { align-self: flex-end; }
+.scopelist { min-width: 380px; max-width: min(520px, 90vw); gap: 2px; }
+.scopelist input { margin-bottom: 4px; }
+.scopelist code { font-size: 11.5px; }
+.scopelist .mi.on { color: #dcd0ff; }
+.scand { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 8px; }
+.scand:hover { background: var(--panel2); }
+.scand .ct { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.scand .ct .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scand .ct .meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scand .sbtn { flex: none; padding: 2px 9px; font-size: 12px; border-radius: 999px; }
+.scand .sbtn.on { border-color: rgba(196,166,255,.6); background: rgba(196,166,255,.14); color: #dcd0ff; }
+
+/* The map: the card's row, the tray. */
+.mapcard .askrow { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 8px; }
+.mapcard .askrow button { flex: 1; padding: 5px 8px; font-size: 12.5px; white-space: nowrap; }
+.mapcard .askrow button.pick { flex: none; }
+.mapcard .askrow button.pick.on { border-color: rgba(196,166,255,.6); background: rgba(196,166,255,.14); color: #dcd0ff; }
+.scopetray { position: absolute; z-index: 7; top: 12px; left: 14px; max-width: calc(100% - 370px); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 8px 10px; border-radius: 12px; background: rgba(16,21,30,.92); backdrop-filter: blur(14px); border: 1px solid rgba(196,166,255,.35); box-shadow: 0 8px 30px rgba(0,0,0,.45); font-size: 12.5px; }
+.scopetray .count { color: var(--ink); white-space: nowrap; } .scopetray .dim { color: var(--ink2); }
+.scopetray .chips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; max-height: 64px; overflow: auto; }
+.scopechip.mini { font-size: 11.5px; } .scopechip.mini button.go { max-width: 24ch; padding: 2px 8px; }
+.scopetray .acts { display: flex; gap: 6px; margin-left: auto; }
+.scopetray .acts button { padding: 4px 10px; font-size: 12.5px; white-space: nowrap; }
+@media (max-width: 720px) { .scopetray { max-width: calc(100% - 20px); left: 10px; top: 8px; } .scopelist { min-width: 0; } }

@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>B0 fixture</title>
+<style>
+  body { font: 16px system-ui; margin: 24px; }
+  #clock { font: bold 48px monospace; color: #fff; background: #2a7; padding: 12px; display: inline-block; }
+  label { display: block; margin-top: 12px; }
+  input, textarea { font: 16px system-ui; width: 420px; }
+  textarea { height: 80px; }
+</style></head>
+<body>
+  <h1>B0 fixture form</h1>
+  <div id="clock">--</div>
+  <form id="f" onsubmit="event.preventDefault(); document.getElementById('out').textContent='submitted: '+new FormData(this).get('name')">
+    <label>Name <input id="name" name="name" autocomplete="off"></label>
+    <label>Email <input id="email" name="email" type="email" autocomplete="off"></label>
+    <label>Notes <textarea id="notes" name="notes"></textarea></label>
+    <label><input id="agree" type="checkbox" name="agree"> I agree</label>
+    <button id="go" type="submit">Send</button>
+  </form>
+  <p id="out"></p>
+  <script>
+    const t0 = Date.now();
+    setInterval(() => { document.getElementById('clock').textContent = ((Date.now() - t0) / 1000).toFixed(1) + 's'; }, 100);
+  </script>
+</body>
+</html>

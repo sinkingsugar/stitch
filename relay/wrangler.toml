@@ -1,0 +1,14 @@
+# Stitch's push relay (relay/README.md). Deploy: `wrangler deploy`, after
+# `wrangler secret put APNS_KEY` (the .p8), `APNS_KEY_ID`, `APNS_TEAM_ID`.
+name = "stitch-relay"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+APNS_TOPIC = "com.fragcolor.stitch"
+
+# Pushes per device token: 30 a minute.
+[[ratelimits]]
+name = "LIMITER"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }

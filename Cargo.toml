@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# The Functional Source License, Version 1.1, Apache 2.0 Future License: the
+# LICENSE file at the root (no `license-file` as well: Cargo warns when both
+# are set). Not published to crates.io.
+license = "FSL-1.1-ALv2"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# libc 0.2.190 has net/route.h and netinet6/in6_var.h items on macOS only
+# (neither header is in the iOS or visionOS SDK), so iroh's netdev and
+# netwatch no longer build for them; neither had visionOS code at all. Our
+# forks, on their released versions, define what they need and take every
+# Apple OS: netdev 0.46.3 with shellrow/netdev#192, netwatch 0.19.3. Drop
+# each once a release fixes it.
+[patch.crates-io]
+netdev = { git = "https://github.com/sinkingsugar/netdev", rev = "f6ab7395482adff06bb5550b9a9c96f89c81af7a" }
+netwatch = { git = "https://github.com/sinkingsugar/net-tools", rev = "3e5d643cd415c172853e5a8c6f38aae55252e330" }
+
+# Dependencies keep line tables only: backtraces still have their lines,
+# and their artifacts shrink by about half and link faster. Our own crates
+# keep full debug info.
+[profile.dev.package."*"]
+debug = "line-tables-only"

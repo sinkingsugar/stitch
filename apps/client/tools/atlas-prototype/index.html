@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Atlas</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="bar">
+  <nav id="tabs" role="tablist">
+    <button data-view="islands" class="on" role="tab">Islands</button>
+    <button data-view="river" role="tab">River</button>
+    <button data-view="space" role="tab">Space</button>
+  </nav>
+  <input id="q" type="search" placeholder="Search threads…" autocomplete="off" spellcheck="false">
+  <div id="time" class="seg" role="group" aria-label="Time">
+    <button data-t="today">today</button><button data-t="3d">3d</button><button data-t="week">week</button><button data-t="month">month</button><button data-t="all" class="on">all</button>
+  </div>
+  <button id="needs" class="tog" title="Only what needs you"><i class="dot need"></i>needs you <b id="needsN"></b></button>
+  <button id="unread" class="tog" title="Unread marks"><i class="dot unread"></i>unread <b id="unreadN"></b></button>
+  <span id="prog" hidden></span>
+  <span id="stat"></span>
+</header>
+
+<main id="stage">
+  <section id="v-islands" class="view on"><canvas></canvas></section>
+  <section id="v-river" class="view"><canvas></canvas></section>
+  <section id="v-space" class="view"><div id="space-host"></div><div id="space-msg" class="msg" hidden></div>
+    <button id="topdown" class="fab" hidden>Top-down</button></section>
+  <div id="legend"><span><i class="dot work"></i>working</span><span><i class="dot need"></i>needs you</span><span><i class="dot unread"></i>unread</span><span><i class="dot idle"></i>idle · fades with age</span></div>
+  <div id="hint"></div>
+  <aside id="card" hidden></aside>
+  <div id="overlay" hidden></div>
+</main>
+
+<script src="/_lib/d3.min.js"></script>
+<script src="common.js"></script>
+<script src="islands.js"></script>
+<script src="river.js"></script>
+<script src="ui.js"></script>
+<script type="module" src="space.js"></script>
+</body>
+</html>

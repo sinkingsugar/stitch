@@ -1,0 +1,71 @@
+// edge_talk_conversations: edge talk's conversations, the latest first,
+// by title (its words in order, each anywhere in it) and by date: those
+// that were active between `from` and `to`.
+
+@include("edge-talk.otr")
+
+@const(list-sql "SELECT c.id AS id, c.title AS title, substr(c.created_at, 1, 10) AS created,
+  substr(coalesce(c.updated_at, c.created_at), 1, 10) AS updated, a.name AS actor,
+  (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id) AS n
+FROM conversations c LEFT JOIN actors a ON a.id = c.actor_id
+WHERE (:like = '' OR c.title LIKE :like)
+  AND substr(c.created_at, 1, 10) <= :to
+  AND substr(coalesce(c.updated_at, c.created_at), 1, 10) >= :from
+ORDER BY coalesce(c.updated_at, c.created_at) DESC
+LIMIT :limit OFFSET :offset")
+
+@fn(Conversations input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input | DbPath = db
+  input.input = args
+  args.title | ExpectString(default: "") | String.Trim = title
+  title | Terms = terms
+  terms | String.Join("%") = joined
+  joined | If({Is("")} {""} {f"%{joined}%"}) = like
+  args.from | DayOr(default: "0000-00-00" name: "from") = from
+  args.to | DayOr(default: "9999-99-99" name: "to") = to
+  args.limit | ExpectInt(default: 30) | Max(1) | Min(100) = limit
+  args.offset | ExpectInt(default: 0) | Max(0) = offset
+  @list-sql = sql
+  {like: like from: from to: to limit: limit offset: offset}
+  Db.Query(sql db max-rows: 100) = rows
+
+  rows | Count = n
+  title | If({Is("")} {""} {f" titled like \"{title}\""}) = what
+  [] | Var(lines)
+  n | If({Is(0)} {
+    f"No edge talk conversation{what} (from {offset})"
+  } {
+    offset | Add(n) = last
+    f"Edge talk conversations{what}, the latest first, {offset | Add(1)} to {last}; edge_talk_read reads one by its id:"
+  }) | Push(lines)
+  rows | ForEach(row {
+    row.id | ExpectString(default: "") = id
+    row.created | ExpectString(default: "") = created
+    row.updated | ExpectString(default: "") = updated
+    updated | If({Is(created)} {created} {f"{created} to {updated}"}) = when
+    row.actor | ExpectString(default: "") = actor
+    actor | If({Is("")} {""} {f", {actor}"}) = actor-text
+    row.n | ExpectInt(default: 0) = count
+    f"- [{id}] {row.title | Title} ({when}, {count} messages{actor-text})" | Push(lines)
+  })
+  n | When({Is(limit)} {f"More with offset {offset | Add(n)}." | Push(lines)})
+  lines | String.Join("\n")
+})
+
+{
+  definition: {
+    name: "edge_talk_conversations"
+    description: "Lists the user's edge talk conversations (the app they used before Stitch), the latest first: id, title, dates, number of messages, persona. Filter by words in the title and by the days they were active; page with offset. For what was said in them, edge_talk_search."
+    parameters: {
+      type: "object"
+      properties: {
+        title: {type: "string" description: "Words the title has, in this order (case-insensitive); omit for all."}
+        from: {type: "string" description: "Only conversations active on or after this day, YYYY-MM-DD."}
+        to: {type: "string" description: "Only conversations started on or before this day, YYYY-MM-DD."}
+        limit: {type: "integer" description: "How many, 1 to 100. Default 30."}
+        offset: {type: "integer" description: "How many to skip, for the next page. Default 0."}
+      }
+    }
+  }
+  use: "Conversations"
+}

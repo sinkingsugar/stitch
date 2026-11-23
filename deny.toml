@@ -1,0 +1,88 @@
+# cargo-deny (`cargo deny check`): the licenses, bans and sources of the
+# Rust dependencies. `just deny` runs it; CI too. The notices that go with
+# a release are `just notices` (about.toml, notices/).
+
+[graph]
+# The platforms Stitch builds for: the node and CLI on Linux and macOS, the
+# node in process on iOS and visionOS (stitch-ffi). Windows-only crates are
+# out of scope (Windows runs the Linux build under WSL2).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "aarch64-apple-visionos",
+]
+all-features = false
+
+[advisories]
+# RustSEC advisories and yanked crates fail the check, in CI too:
+# vulnerabilities anywhere in the graph; unsound and unmaintained notices
+# for the crates our own crates depend on directly (cargo-deny's default,
+# "workspace"). An advisory we cannot fix yet, or that does not reach what
+# ships, goes in `ignore` with its reason and date; the triage is in
+# docs/advisories.md.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Permissive licenses found in the graph, MPL-2.0 (file-level copyleft:
+# uniffi, attohttpc, used unmodified), and our own.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "WTFPL",
+    "Zlib",
+    "FSL-1.1-ALv2",
+]
+confidence-threshold = 0.9
+# WTFPL (terminfo) and termina are in Cargo.lock through ratatui's optional
+# backends, not built today: allowed and elected ahead of time.
+unused-allowed-license = "allow"
+
+# Where a crate offers a choice, we take MIT.
+[[licenses.clarify]]
+crate = "r-efi"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+crate = "termina"
+expression = "MIT"
+license-files = []
+
+[bans]
+# Several versions of a crate are common in a graph this size (windows-sys,
+# getrandom, syn): not an error.
+multiple-versions = "allow"
+wildcards = "deny"
+# Path dependencies inside the workspace have no version.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Otter and engram (pinned by Cargo.lock), and the forks of netdev and
+# net-tools (netwatch) in the workspace's [patch.crates-io].
+allow-git = [
+    "https://github.com/sinkingsugar/otter",
+    "https://github.com/sinkingsugar/engram",
+    "https://github.com/sinkingsugar/netdev",
+    "https://github.com/sinkingsugar/net-tools",
+]

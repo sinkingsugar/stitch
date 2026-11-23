@@ -1,0 +1,16 @@
+[package]
+name = "stitch-client"
+description = "Publish events to a Stitch node and ask its threads, from any Rust program (docs/events.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Kept small on purpose: an outside program (a CI watcher) links it. Blocking
+# std I/O, no async runtime; call it from `spawn_blocking` in async code.
+[dependencies]
+serde = "1.0.229"
+serde_json = "1.0.154"

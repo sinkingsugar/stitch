@@ -1,0 +1,13 @@
+# `just dev-link`'s overrides (tools/dev-link.sh): Otter and engram from the
+# checkouts beside this one instead of Cargo.lock's pins. Untracked and
+# absent unless linked.
+include = [{ path = "dev-link.toml", optional = true }]
+
+# Otter's build flag (Otter's docs/embedding.md §1): every branch target
+# that is not a fallthrough aligned to 16 bytes, so the Otter VM's speed
+# does not hang on where unrelated code lands (up to 40% either way on
+# Apple M-series). It costs about 5% of binary size. Desktops only: on
+# iOS and visionOS, where tools wait on the network, size counts more than
+# the VM's speed (design §2.17).
+[target.'cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(any(target_os = "ios", target_os = "visionos"))))']
+rustflags = ["-C", "llvm-args=-align-all-nofallthru-blocks=4"]

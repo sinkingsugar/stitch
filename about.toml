@@ -1,0 +1,44 @@
+# cargo-about: the third-party notices of the Rust dependencies Stitch ships
+# (`just notices` writes notices/rust.txt from notices/rust.hbs). The
+# licenses themselves are checked by cargo-deny (deny.toml); this only lists
+# them with their texts. What Cargo does not see is in notices/README.md.
+
+# The platforms Stitch ships on (as deny.toml's [graph] targets).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "aarch64-apple-ios",
+    "aarch64-apple-ios-sim",
+    "aarch64-apple-visionos",
+]
+# Build scripts, proc macros' build-time helpers and test-only crates are
+# not in what ships.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# Stitch's own crates (publish = false) are under LICENSE.
+private = { ignore = true }
+# Where a crate offers a choice, the first of these it offers is the one
+# listed: MIT for r-efi (MIT OR Apache-2.0 OR LGPL-2.1-or-later) and termina
+# (MIT OR MPL-2.0), as deny.toml elects.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "BSD-1-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "MIT-0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "WTFPL",
+]
+

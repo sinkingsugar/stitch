@@ -1,0 +1,3 @@
+[submodule "crates/stitch-llama-sys/llama.cpp"]
+	path = crates/stitch-llama/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp.git

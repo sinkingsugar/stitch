@@ -1,0 +1,89 @@
+// edge_talk_read: one edge talk conversation's messages in order, a page
+// at a time, long messages cut; tool and system rows only when asked.
+
+@include("edge-talk.otr")
+
+@const(head-sql "SELECT c.title AS title, substr(c.created_at, 1, 16) AS created,
+  substr(coalesce(c.updated_at, c.created_at), 1, 16) AS updated, a.name AS actor,
+  (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id
+    AND (:all = 1 OR (coalesce(m.is_system, 0) = 0 AND m.tool_id IS NULL
+      AND coalesce(m.tool_name, '') = ''))) AS n
+FROM conversations c LEFT JOIN actors a ON a.id = c.actor_id
+WHERE c.id = :id")
+
+@const(page-sql "SELECT m.sender AS sender, substr(m.created_at, 1, 16) AS at,
+  substr(m.message, 1, :cap) AS text, length(m.message) AS len, m.tool_name AS tool,
+  coalesce(m.is_system, 0) AS sys, m.attachment IS NOT NULL AS attached
+FROM messages m
+WHERE m.conversation_id = :id
+  AND (:all = 1 OR (coalesce(m.is_system, 0) = 0 AND m.tool_id IS NULL
+    AND coalesce(m.tool_name, '') = ''))
+ORDER BY m.created_at, m.sequence_number
+LIMIT :limit OFFSET :offset")
+
+@fn(Read input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input | DbPath = db
+  input.input = args
+  args.id | ExpectString(default: "") | String.Trim = id
+  id | When({Is("")} {"id is required: a conversation's id, as the other edge_talk tools give it" | Fail})
+  args.offset | ExpectInt(default: 0) | Max(0) = offset
+  args.limit | ExpectInt(default: 30) | Max(1) | Min(100) = limit
+  args.max-chars | ExpectInt(default: 1500) | Max(100) | Min(8000) = cap
+  args.include-tools | ExpectBool(default: false) | If({Is(true)} {1} {0}) = all
+  @head-sql = head-sql
+  @page-sql = page-sql
+
+  {id: id all: all} | Db.Query(head-sql db max-rows: 1) = head
+  head | Count | When({Is(0)} {f"no edge talk conversation has the id {id}" | Fail})
+  head | Take(0) = h
+  h.n | ExpectInt(default: 0) = total
+  h.actor | ExpectString(default: "") = actor
+  actor | If({Is("")} {""} {f", with {actor}"}) = actor-text
+  h.created | ExpectString(default: "") = created
+  h.updated | ExpectString(default: "") = updated
+
+  {id: id all: all cap: cap limit: limit offset: offset}
+  Db.Query(page-sql db max-rows: 100) = rows
+  rows | Count = n
+  [] | Var(lines)
+  n | If({Is(0)} {
+    f"{h.title | Title} [{id}] ({created} to {updated}{actor-text}): {total} messages, none from {offset | Add(1)}"
+  } {
+    f"{h.title | Title} [{id}] ({created} to {updated}{actor-text}): messages {offset | Add(1)} to {offset | Add(n)} of {total}"
+  }) | Push(lines)
+  rows | ForEach(row i {
+    row.len | ExpectInt(default: 0) = len
+    len | If({IsMore(cap)} {f" […{len | Sub(cap)} more characters]"} {""}) = cut
+    row.sender | ExpectString(default: "?") = sender
+    row.tool | ExpectString(default: "") = tool
+    row.sys | ExpectInt(default: 0) = sys
+    sys | If({Is(1)} {" (system)"} {tool | If({Is("")} {""} {f" (tool {tool})"})}) = kind
+    row.attached | ExpectInt(default: 0) | If({Is(1)} {" [attachment]"} {""}) = attached
+    row.text | ExpectString(default: "") | String.Trim = text
+    row.at | ExpectString(default: "") = at
+    f"\n#{offset | Add(i) | Add(1)} {at} {sender}{kind}{attached}:\n{text}{cut}" | Push(lines)
+  })
+  offset | Add(n) | When({IsLess(total)} {
+    f"\nMore: offset {offset | Add(n)}." | Push(lines)
+  })
+  lines | String.Join("\n")
+})
+
+{
+  definition: {
+    name: "edge_talk_read"
+    description: "Reads one of the user's edge talk conversations (the app they used before Stitch) in order, a page at a time: each message's number, time, sender and text, long ones cut. Tool calls and system rows are left out unless include-tools is true. Ids come from edge_talk_search, edge_talk_conversations and edge_talk_memories."
+    parameters: {
+      type: "object"
+      properties: {
+        id: {type: "string" description: "The conversation's id."}
+        offset: {type: "integer" description: "How many messages to skip (the page's start). Default 0."}
+        limit: {type: "integer" description: "How many messages, 1 to 100. Default 30."}
+        max-chars: {type: "integer" description: "The most characters of each message, 100 to 8000. Default 1500."}
+        include-tools: {type: "boolean" description: "Also tool calls, tool results and system rows. Default false."}
+      }
+      required: ["id"]
+    }
+  }
+  use: "Read"
+}

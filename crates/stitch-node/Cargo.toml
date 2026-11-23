@@ -1,0 +1,121 @@
+[package]
+name = "stitch-node"
+description = "The Stitch node: config, credentials, chat engine, local client API and sync loop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# TypeScript types of the client protocol (design §2.24), written by
+# `just client-types`. Off by default: nothing else links ts-rs.
+ts = ["dep:ts-rs"]
+
+[dependencies]
+ts-rs = { version = "12", optional = true }
+base64 = "0.23.1"
+blake3 = "1.8.7"
+calamine = "0.38"
+csv = "1.4.0"
+hayro = "0.8.0"
+iroh = "1.3.0"
+jiff = "0.2.38"
+libc = "0.2.190"
+pdf-extract = "0.12.1"
+postcard = { version = "1.1.3", features = ["use-std"] }
+diffy = "0.5"
+flate2 = "1.1.10"
+# Pages made Markdown, whichever browser rendered them (Chrome, or the
+# phone's WebKit the app lends the node).
+htmd = "0.5.5"
+futures-util = "0.3.34"
+rmcp = { version = "3.11.0", default-features = false, features = ["client", "transport-async-rw", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+ring = "0.17.14"
+# Opening what other nodes sealed for this one (secrets, design §2.19):
+# ring has no static X25519 keys.
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream", "json", "http2"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+similar = "3"
+walkdir = "2.5.0"
+stitch-memory = { version = "0.1.0", path = "../stitch-memory" }
+stitch-net = { version = "0.1.0", path = "../stitch-net" }
+stitch-providers = { version = "0.1.0", path = "../stitch-providers" }
+stitch-records = { version = "0.1.0", path = "../stitch-records" }
+stitch-shell = { version = "0.1.0", path = "../stitch-shell" }
+stitch-ssh = { version = "0.1.0", path = "../stitch-ssh" }
+stitch-store = { version = "0.1.0", path = "../stitch-store" }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "fs", "process"] }
+toml = "1.1.8"
+url = "2.5.9"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Tools written in Otter (design §2.17), on every node, the phone
+# included: Otter, the language and its runtime, a git dependency pinned
+# by Cargo.lock (`just bump-otter`; `just dev-link` for ../otter). The catalog is the `otter` command's (core,
+# I/O, text), so a script `otter tool` runs runs here.
+otter-core = { git = "https://github.com/sinkingsugar/otter" }
+otter-lang = { git = "https://github.com/sinkingsugar/otter" }
+otter-io = { git = "https://github.com/sinkingsugar/otter", features = ["rustls-ring"] }
+otter-text = { git = "https://github.com/sinkingsugar/otter" }
+# `Db.Query`: read-only SQLite (FTS5), for the `edge-talk` skill's tools
+# (edge talk's database read in place). It bundles SQLite through rusqlite
+# 0.41, the line stitch-store links.
+otter-sqlite = { git = "https://github.com/sinkingsugar/otter" }
+serde_ignored = "0.1.14"
+
+# What iOS and visionOS cannot have: a Chrome to start, and the `keyring`
+# crate's stores.
+[target.'cfg(not(any(target_os = "ios", target_os = "visionos")))'.dependencies]
+chromiumoxide = "0.9.1"
+keyring = "4.2.0"
+# The desktop's server of apps (`apps::http`).
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+# The web client's WebSocket (design §2.24), over hyper's upgrade.
+tokio-tungstenite = { version = "0.28", default-features = false }
+http-body-util = "0.1.5"
+# Desktop notifications (`toasts`): D-Bus `org.freedesktop.Notifications`
+# on Linux (through zbus, which `keyring` links already), the
+# Notification Center on macOS, toasts on Windows. Its default zbus on
+# async-io, as `keyring` has it: zbus's `tokio` feature would make the
+# keyring's blocking calls start a runtime inside the node's, and panic.
+notify-rust = "4.18.2"
+
+[target.'cfg(any(target_os = "ios", target_os = "visionos"))'.dependencies]
+security-framework = "3.7.0"
+# Projects cloned on the phone (design §2.16); desktops have checkouts.
+gix = { version = "0.89.0", default-features = false, features = ["blocking-http-transport-reqwest", "worktree-mutation", "sha1"] }
+
+[dev-dependencies]
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+gix = { version = "0.89.0", default-features = false, features = ["blocking-http-transport-reqwest", "worktree-mutation", "sha1"] }
+# The edge-talk skill's tests build a small database with edge talk's schema.
+rusqlite = { version = "0.41", features = ["bundled"] }
+# An SSH server in the test's process, for the shell tools on a host.
+stitch-ssh = { path = "../stitch-ssh", features = ["testing"] }
+# An outside program's client of the events protocol (docs/events.md).
+stitch-client = { path = "../stitch-client" }
+
+[[test]]
+name = "mcp"
+harness = false
+
+[[test]]
+name = "remote_tools"
+harness = false
+
+[[test]]
+name = "secrets"
+harness = false
+
+[[test]]
+name = "ssh"
+harness = false

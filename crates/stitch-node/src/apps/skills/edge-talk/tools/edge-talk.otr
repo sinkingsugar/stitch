@@ -1,0 +1,58 @@
+// What the edge-talk tools share: the database's path, date and text
+// helpers, and the FTS5 query a search runs (arguments are read with
+// `Expect*(default:)`). A library (no top-level code), so not
+// a tool itself.
+//
+// Edge talk's database (its Scripts-Src/db.sql): conversations, messages
+// (sender, message, created_at, sequence_number, tool_id, tool_name,
+// is_system, model, attachment), memory (distilled memories), actors; and
+// two contentless FTS5 indexes, messages_fts and memory_fts, whose `id`
+// column (stored, unindexed) is the row's id. Edge talk indexes only
+// substantive messages (a user's over 50 characters, an assistant's over
+// 200, no tool or system rows) with `porter unicode61 remove_diacritics 1`.
+// The FTS tables keep no text, so snippets are cut from the message itself.
+
+// The database's path: the host gives it in `env`, to these tools only.
+@fn(DbPath input: {input: {} env: {} working-dir: String} output: String params: {} {
+  input.env.edge-talk-db | If({IsString} {ExpectString} {
+    "edge talk's database is not given to this tool (it runs only as the built-in edge-talk skill's)" | Fail
+  })
+})
+
+// A day, `YYYY-MM-DD` (a longer date or time keeps its first ten
+// characters), or `default` when none is given; anything else fails.
+@fn(DayOr input: Any output: String params: {default: String name: String} {
+  ExpectString(default: "") | String.Trim = given
+  given | If({Is("")} {default} {
+    given | Regex.Match("(?s)^(\\d{4}-\\d{2}-\\d{2}).*$") = m
+    m | Count | If({Is(0)} {
+      f"{name} must be a date, YYYY-MM-DD, got {given}" | Fail
+    } {m | Take(1) | ExpectString})
+  })
+})
+
+// The words of a query, at most 12: letters, digits and `_` (FTS5's
+// operators and punctuation dropped, so any text is a safe query). A lone
+// ASCII letter or digit (the `s` of "otter's") is dropped too.
+@fn(Terms input: String output: [String] params: {} {
+  Regex.Search("[\\p{L}\\p{N}_]+") | Map({.0 | ExpectString})
+  | Filter({Regex.Match("^[A-Za-z0-9]$") | Count | Is(0)})
+  | Slice(to: 12)
+})
+
+// The FTS5 query: each word a quoted prefix (`"otter"*`), all of them
+// (`any: false`) or any (`any: true`, ranked by how many match).
+@fn(FtsMatch input: [String] output: String params: {any: Bool} {
+  Map(t {f"\"{t}\"*"}) | String.Join(any | If({Is(true)} {" OR "} {" "}))
+})
+
+// Text on one line, its runs of whitespace made one space.
+@fn(OneLine input: Any output: String params: {} {
+  ExpectString(default: "") | Regex.Replace("\\s+" " ") | String.Trim
+})
+
+// A conversation's title, or `(untitled)`.
+@fn(Title input: Any output: String params: {} {
+  OneLine = t
+  t | If({Is("")} {"(untitled)"} {t})
+})

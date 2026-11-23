@@ -1,0 +1,24 @@
+[package]
+name = "stitch-memory"
+description = "Stitch's memory: engram over EmbeddingGemma 2, as a deterministic fold of synced facts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pinned by Cargo.lock (`just bump-engram`; `just dev-link` for ../engram).
+# The package is `engram-gate` (its lib is still `engram`).
+engram = { package = "engram-gate", git = "https://github.com/sinkingsugar/engram" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+stitch-llama = { version = "0.1.0", path = "../stitch-llama" }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+engram-fit = { git = "https://github.com/sinkingsugar/engram" }
+tempfile = "3.27.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }

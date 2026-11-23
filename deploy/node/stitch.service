@@ -1,0 +1,26 @@
+# The Stitch node as a systemd user unit, written by `stitch node service
+# install` (docs/setup.md §1, "A node as a service"), from this template
+# (its placeholders filled in). Exit status 75 is a restart the node asked
+# for (a new build installed, `stitch node restart`); any other error
+# (a crash, a build on trial that never got healthy) restarts it too.
+# (No ordering on the network: a user manager cannot see the system's.)
+[Unit]
+Description=Stitch node
+
+[Service]
+Type=simple
+Environment="PATH=@QPATH@"
+Environment="SHELL=@QSHELL@"
+Environment=STITCH_SUPERVISED=1
+WorkingDirectory=%h
+ExecStart=@EXE@ --data @DATA@ node
+Restart=on-failure
+RestartSec=5
+# The node closes its own shells, MCP servers and browser when it stops;
+# what an agent left running on purpose (`nohup server &`) outlives a
+# restart, as it does without a unit.
+KillMode=process
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

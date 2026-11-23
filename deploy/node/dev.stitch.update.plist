@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Stitch's self-update every 30 minutes (macOS), written by `stitch node
+     service install --update` to ~/Library/LaunchAgents/dev.stitch.update.plist. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.stitch.update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@SCRIPT@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>STITCH_CHECKOUT</key><string>@CHECKOUT@</string>
+    <key>STITCH_DATA</key><string>@DATA@</string>@ROLLOUT@
+  </dict>
+  <key>StartInterval</key><integer>1800</integer>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>@DATA@/update.log</string>
+  <key>StandardErrorPath</key><string>@DATA@/update.log</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+</dict>
+</plist>

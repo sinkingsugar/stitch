@@ -1,0 +1,24 @@
+[package]
+name = "stitch-llama"
+description = "llama.cpp in-process for Stitch: embeddings of text and images (EmbeddingGemma 2), on macOS, Linux and iOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "llama"
+build = "build.rs"
+exclude = ["llama.cpp/.git"]
+
+# FFI needs `unsafe`; it stays in this crate (the workspace denies it).
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]
+# Images are decoded and scaled down here before the vision projector sees
+# them (`IMAGE_SIDE`); pure Rust, so it builds for iOS.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+thiserror = "2.0.21"
+
+[build-dependencies]
+bindgen = "0.73.2"
+cmake = "0.1.58"

@@ -1,0 +1,14 @@
+# Follows a branch of Stitch, Otter and engram (main, or the rollout's:
+# STITCH_FOLLOW) and installs a new build when anything changed; the node
+# restarts into it once idle. Written by `stitch
+# node service install --update` with stitch-update.timer.
+[Unit]
+Description=Update Stitch from the branch it follows (main, or the rollout's; the node restarts into the new build once idle)
+
+[Service]
+Type=oneshot
+Environment="STITCH_CHECKOUT=@QCHECKOUT@"
+Environment="STITCH_DATA=@QDATA@"@ROLLOUT@
+ExecStart=@SCRIPT@
+Nice=10
+TimeoutStartSec=4h

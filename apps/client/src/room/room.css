@@ -1,0 +1,97 @@
+/* Rooms (design §2.27): the roster bar, speaker headers, quiet notes, the @ menu, the New Room dialog. */
+.sdot { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--sc, var(--grey)); box-shadow: 0 0 0 2px rgba(0,0,0,.25); }
+
+.roster { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 8px 18px; border-bottom: 1px solid var(--edge); background: rgba(255,255,255,.015); font-size: 12.5px; }
+.roster .pills { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; flex: 1 1 100%; }
+.pill { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px 0 9px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--sc) 40%, transparent); background: color-mix(in srgb, var(--sc) 9%, transparent); max-width: 100%; }
+.pill.speaking { box-shadow: 0 0 0 1px var(--sc), 0 0 12px color-mix(in srgb, var(--sc) 45%, transparent); }
+.pill.speaking .sdot { animation: pulse 1.2s ease-in-out infinite; }
+.pill.muted { opacity: .55; }
+.pill.asks { border-color: var(--apricot); }
+.pill .adot { flex: none; margin-left: 4px; }
+.pill button { background: none; border: 0; border-radius: 999px; padding: 3px 5px; font-size: 12.5px; color: inherit; }
+.pill button:hover, .pill button:focus-visible { background: color-mix(in srgb, var(--sc) 20%, transparent); }
+.pill .pname { font-weight: 600; padding-left: 6px; }
+.pill .pslug { color: var(--sc); font-family: var(--mono); font-size: 11.5px; }
+.pill .pmeta { color: var(--ink2); font-size: 11.5px; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30ch; }
+.pill .pro { font-size: 10px; color: var(--ink2); border: 1px solid var(--edge); border-radius: 6px; padding: 0 4px; margin-right: 2px; }
+.pill .pro.rw { border-style: dashed; opacity: .6; }
+.pill .pstop { color: var(--coral); font-size: 10px; }
+.pill .pmute { font-size: 11px; }
+.pill .prm { color: var(--ink2); padding-right: 8px; }
+.radd { padding: 3px 10px; font-size: 12.5px; border-radius: 999px; border-style: dashed; }
+.radd-pop { left: 0; right: auto; min-width: 340px; gap: 6px; }
+.radd-pop h4, .roomdlg h4 { margin: 4px 0 0; color: var(--ink2); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 600; }
+.roster .policy { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.seg { display: inline-flex; align-items: center; gap: 0; }
+.seg > button { padding: 3px 10px; font-size: 12.5px; border-radius: 0; }
+.seg > button:first-child { border-radius: 8px 0 0 8px; }
+.seg > button:nth-child(2) { border-radius: 0 8px 8px 0; border-left: 0; }
+.seg > button.on { background: rgba(97,197,197,.16); border-color: rgba(97,197,197,.5); color: var(--mint); }
+.hops { display: inline-flex; align-items: center; gap: 4px; color: var(--ink2); font-size: 12px; margin-left: 8px; }
+.hops select, .madder select, .prow select { font: inherit; font-size: 12.5px; color: var(--ink); background: var(--panel2); border: 1px solid var(--edge); border-radius: 6px; padding: 2px 4px; }
+.rfrom { font-size: 12px; }
+
+/* A reply's speaker, and the room's notes. */
+.speaker { display: flex; align-items: baseline; gap: 6px; margin: 0 0 4px; font-size: 12.5px; }
+.speaker .sdot { align-self: center; }
+.speaker .sname { color: var(--sc); }
+.speaker .sslug { color: var(--ink2); font-family: var(--mono); font-size: 11.5px; }
+.speaker .smodel { color: var(--ink2); font-size: 11.5px; }
+.speaker .sthread { margin-left: auto; padding: 0 6px; font-size: 11.5px; background: none; border-color: transparent; color: var(--ink2); }
+.speaker .sthread:hover { color: var(--mint); border-color: var(--edge); }
+.msg.asst.spoke { border-left: 2px solid color-mix(in srgb, var(--sc) 60%, transparent); padding-left: 12px; }
+.note.rnote { display: flex; align-items: center; justify-content: center; gap: 6px; font-style: italic; opacity: .8; }
+.note.rnote.room { font-style: normal; }
+.roomtag-msg { font-size: 11.5px; color: var(--ink2); margin-bottom: 4px; }
+.roomtag-msg .link { padding: 0; font-size: 11.5px; }
+.roomback { padding: 6px 18px; font-size: 12.5px; color: var(--ink2); border-bottom: 1px solid var(--edge); }
+.roomback .link { padding: 0 4px; }
+.working .who { display: inline-flex; align-items: center; gap: 6px; color: var(--sc); font-weight: 600; }
+
+/* The composer in a room: the @ menu and who the message goes to. */
+.cbox { position: relative; }
+.mentions { position: absolute; left: 8px; bottom: calc(100% + 6px); z-index: 22; min-width: 260px; max-width: min(420px, 90vw); background: var(--panel); border: 1px solid var(--edge); border-radius: 10px; padding: 4px; box-shadow: 0 8px 30px rgba(0,0,0,.5); display: flex; flex-direction: column; }
+.mentions button { display: flex; align-items: center; gap: 8px; text-align: left; background: none; border-color: transparent; padding: 5px 8px; font-size: 13px; }
+.mentions button.on, .mentions button:hover { background: var(--panel2); }
+.mentions .ms { font-family: var(--mono); color: var(--sc); }
+.mentions .meta { margin-left: auto; }
+.rtarget { align-self: flex-end; font-size: 12px; color: var(--ink2); padding: 6px 4px; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+.rtarget b { color: var(--ink); font-weight: 600; }
+
+/* The sidebar's room rows. */
+.roomtag { display: inline-block; margin-left: 6px; font-size: 10.5px; font-weight: 600; padding: 0 6px; border-radius: 8px; color: #cfe0f8; background: rgba(140,180,235,.14); border: 1px solid rgba(140,180,235,.3); vertical-align: 1px; }
+.roomtag.council { color: #f5c89a; background: rgba(245,160,90,.12); border-color: rgba(245,160,90,.3); }
+.side-top .newroom { padding: 6px 10px; font-size: 12.5px; white-space: nowrap; }
+
+/* The New Room dialog. */
+.roomdlg { width: min(600px, 94vw); }
+.roomdlg .plist { display: flex; flex-direction: column; gap: 4px; }
+.prow { display: flex; align-items: center; gap: 8px; }
+.prow .pm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow .prm { padding: 2px 8px; }
+.madder { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.madder select:first-child { flex: 1; min-width: 180px; }
+.madder button { padding: 3px 10px; font-size: 12.5px; }
+.tfinder { display: flex; flex-direction: column; gap: 2px; }
+.tfinder input { width: 100%; }
+.rscopes { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.roomdlg .scopepick { position: static; }
+.roomdlg .scopepick .mlist { position: static; box-shadow: none; margin-top: 6px; min-width: 0; width: 100%; max-height: 260px; overflow-y: auto; }
+.roomdlg .scopepick .scrim { display: none; }
+.roomdlg .frm label { gap: 8px; }
+.roomdlg .frm select, .roomdlg .frm input:not([type=checkbox]):not(.num) { flex: 1; font-size: 13px; }
+.roomdlg .frm select { color: var(--ink); background: var(--panel2); border: 1px solid var(--edge); border-radius: 8px; padding: 6px; }
+.roomdlg .btns.end { display: flex; gap: 8px; align-items: center; }
+.roomdlg .btns.end .meta { margin-right: auto; }
+.mapcard .askrow button.room { flex: none; }
+button.pullin { padding: 4px 9px; font-size: 12.5px; color: var(--ink2); }
+button.pullin:hover { color: var(--mint); }
+@media (max-width: 720px) { button.pullin { display: none; } }
+@media (max-width: 720px) { .roster { padding: 6px 10px; } .pill .pmeta { display: none; } .radd-pop { min-width: 0; width: 90vw; } }
+
+/* A participant's question, in the room (design §2.27). */
+.approval.rask .speaker { margin-bottom: 6px; }
+.approval.rask .btns { align-items: center; flex-wrap: wrap; }
+.approval.rask .rwhy { flex: 1 1 140px; min-width: 120px; max-width: 280px; font: inherit; font-size: 12.5px; color: var(--ink); background: var(--panel2); border: 1px solid var(--edge); border-radius: 8px; padding: 5px 8px; }
+.note.rnote.asked { color: var(--ink2); }

@@ -1,0 +1,10 @@
+{
+  "threads": {
+    "places": ["global"],
+    "tools": ["files", "viewer", "images"],
+    "models": ["default", "quick"],
+    "budget": { "usd": 1, "minutes": 30, "steps": 30 },
+    "daily_usd": 5,
+    "concurrent": 2
+  }
+}

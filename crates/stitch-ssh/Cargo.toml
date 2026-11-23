@@ -1,0 +1,34 @@
+[package]
+name = "stitch-ssh"
+description = "SSH for Stitch: remote shell sessions (tmux where the host has it), host keys trusted on first use, the device's key"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+stitch-shell = { path = "../stitch-shell" }
+# Pure Rust (ring, no aws-lc), so it builds for iOS and visionOS.
+russh = { version = "0.65.4", default-features = false, features = ["ring", "flate2", "rsa"] }
+rand = "0.10.3"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt", "sync", "time", "io-util", "net", "macros"] }
+tempfile = { version = "3.27.0", optional = true }
+pty-process = { version = "0.5.3", features = ["async"], optional = true }
+
+[features]
+# `testing`: an SSH server in the test's own process, for other crates' tests.
+testing = ["dep:tempfile", "dep:pty-process", "tokio/process", "tokio/rt-multi-thread"]
+
+[target.'cfg(any(target_os = "ios", target_os = "visionos"))'.dependencies]
+security-framework = "3.7.0"
+security-framework-sys = "2.17"
+core-foundation = "0.10"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "process"] }
+pty-process = { version = "0.5.3", features = ["async"] }
