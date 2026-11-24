@@ -175,14 +175,66 @@ tell() {
   "$bin" --data "$data" notify --title "Stitch update on $(hostname -s 2>/dev/null || hostname)" "$body" >/dev/null 2>&1 || true
 }
 
-# The trial of the installed build (written after each install): its label,
-# the time it was installed, and each repo's HEAD commit (in `repos` order).
-# A build's trial is finished, and the build promoted, before a newer main
-# is taken: the next run is ~30 minutes after the restart, by when main has
-# usually moved, and a trial that restarts with every commit never ends.
+# The trial of the installed build: its label, when the trial began, and the
+# commits it promotes (the core's, and the app checkout's where there is
+# one). It begins at each install, and again when the app checkout moved
+# alone (app_trial: the core's build stays, nothing is built, since the app
+# runs in no node's build). A build's trial is finished, and its commits
+# promoted, before a newer main is taken: the next run is ~30 minutes after
+# the restart, by when main has usually moved, and a trial that restarts
+# with every commit never ends.
+#
+# Written whole, then moved into place, one `key=value` a line (label=,
+# at=, core=, app=). Read by key; a file of the older format (the label,
+# the time, then each repo's commit in `repos` order, one a line) is read
+# too, from its time's line (all digits) on, the line before it the label,
+# whatever came before them (lines other output once left there).
 trial_file="$HOME/.cache/stitch-self-update.trial"
+t_label= t_at= t_heads=()
+read_trial() {
+  t_label= t_at= t_heads=()
+  [ -f "$trial_file" ] || return 0
+  local line keyed=0 i lines=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    lines+=("$line")
+    case $line in
+      label=*) keyed=1; t_label=${line#label=} ;;
+      at=*) t_at=${line#at=} ;;
+      core=*) t_heads[0]=${line#core=} ;;
+      app=*) t_heads[1]=${line#app=} ;;
+    esac
+  done <"$trial_file"
+  [ "$keyed" = 1 ] && return 0
+  t_at= t_heads=()
+  for ((i = 1; i < ${#lines[@]}; i++)); do
+    case ${lines[$i]} in
+      '' | *[!0-9]*) continue ;;
+    esac
+    t_label=${lines[$((i - 1))]}
+    t_at=${lines[$i]}
+    for line in "${lines[@]:$((i + 1))}"; do
+      case $line in
+        '' | *[!0-9a-f]*) break ;;
+      esac
+      t_heads+=("$line")
+    done
+    return 0
+  done
+  t_label=
+}
+# write_trial <label> <core commit> [<app commit>]: a trial beginning now.
+write_trial() {
+  { echo "label=$1"; echo "at=$(date +%s)"; echo "core=$2"; [ -z "${3:-}" ] || echo "app=$3"; } \
+    >"$trial_file.new" && mv -f "$trial_file.new" "$trial_file"
+  read_trial
+}
+read_trial
 trial_is_installed() {
-  [ -n "$have" ] && [ -f "$trial_file" ] && [ "$(sed -n 1p "$trial_file")" = "$have" ]
+  [ -n "$have" ] && [ "$t_label" = "$have" ]
+}
+# The trial began at least $1 seconds ago.
+trial_older_than() {
+  [ $(($(date +%s) - ${t_at:-0})) -ge "$1" ]
 }
 
 # What ran healthy here long enough goes on to the next nodes: this exact
@@ -192,19 +244,23 @@ trial_is_installed() {
 # checkouts' HEADs (the installed build must then be origin/$follow's).
 promote() {
   [ -n "${STITCH_PROMOTE:-}" ] || return 0
-  local from_trial=0
+  local from_trial=0 after=${STITCH_PROMOTE_AFTER:-1800}
   if trial_is_installed; then
     from_trial=1
   elif [ "$have" != "$want" ]; then
     echo "not promoting: the installed build is not origin/$follow's"; return 0
   fi
-  "$bin" --data "$data" node builds --healthy-for "${STITCH_PROMOTE_AFTER:-1800}" >/dev/null 2>&1 \
+  "$bin" --data "$data" node builds --healthy-for "$after" >/dev/null 2>&1 \
     || { echo "not promoting yet: not healthy here for long enough"; return 0; }
+  # (an app-only trial: the process has been up longer than its trial)
+  if [ "$from_trial" = 1 ] && ! trial_older_than "$after"; then
+    echo "not promoting yet: the trial began less than ${after}s ago"; return 0
+  fi
   local repo head remote out i
-  local heads=()
+  local heads=() todo=()
   for i in "${!repos[@]}"; do
     head=
-    [ "$from_trial" = 1 ] && head=$(sed -n "$((i + 3))p" "$trial_file")
+    [ "$from_trial" = 1 ] && head=${t_heads[$i]:-}
     # (a repo the trial did not record, STITCH_APP set since: HEAD, when
     # the installed build is origin/$follow's)
     [ -n "$head" ] || [ "$have" != "$want" ] || head=$(git -C "${repos[$i]}" rev-parse HEAD)
@@ -221,8 +277,10 @@ promote() {
       tell promote "not promoting: $repo's origin/$STITCH_PROMOTE is not behind $head"
       return 0
     fi
+    todo+=("$i")
   done
-  for i in "${!repos[@]}"; do
+  [ "${#todo[@]}" -gt 0 ] || { echo "promoted already"; return 0; }
+  for i in "${todo[@]}"; do
     repo=${repos[$i]}
     head=${heads[$i]}
     if out=$(git -C "$repo" push --quiet origin "$head:refs/heads/$STITCH_PROMOTE" 2>&1); then
@@ -234,16 +292,18 @@ promote() {
   done
 }
 
-# The installed build is in its trial: it is the recorded one, not yet
-# promoted, healthy now, not past the trial, and installed less than
+# The installed build is in its trial: it is the recorded one, its commits
+# not yet promoted, healthy now, not past the trial (healthy that long, and
+# the trial begun that long ago), and the trial begun less than
 # STITCH_TRIAL_HOLD ago (so a build that keeps restarting cannot hold main
 # back forever).
 in_trial() {
   trial_is_installed || return 1
-  local i repo head remote now at promoted=1
+  local i repo head remote promoted=1 after=${STITCH_PROMOTE_AFTER:-1800}
   for i in "${!repos[@]}"; do
     repo=${repos[$i]}
-    head=$(sed -n "$((i + 3))p" "$trial_file")
+    head=${t_heads[$i]:-}
+    [ -n "$head" ] || continue  # (not recorded: nothing of it to finish)
     remote=$(git -C "$repo" rev-parse --verify --quiet "origin/$STITCH_PROMOTE" || true)
     if [ -z "$remote" ] || ! git -C "$repo" merge-base --is-ancestor "$head" "$remote" 2>/dev/null; then
       promoted=0
@@ -251,10 +311,29 @@ in_trial() {
   done
   [ "$promoted" = 0 ] || return 1  # already promoted (or passed)
   "$bin" --data "$data" node builds --healthy-for 0 >/dev/null 2>&1 || return 1
-  ! "$bin" --data "$data" node builds --healthy-for "${STITCH_PROMOTE_AFTER:-1800}" >/dev/null 2>&1 || return 1
-  now=$(date +%s)
-  at=$(sed -n 2p "$trial_file")
-  [ $((now - ${at:-0})) -lt "${STITCH_TRIAL_HOLD:-7200}" ]
+  if "$bin" --data "$data" node builds --healthy-for "$after" >/dev/null 2>&1 \
+    && trial_older_than "$after"; then
+    return 1
+  fi
+  ! trial_older_than "${STITCH_TRIAL_HOLD:-7200}"
+}
+
+# The app checkout moved alone (the core's build is up to date): its new
+# commit begins a trial of its own, the core's build kept (nothing is
+# built: the app runs in no node's build), promoted once that trial passed
+# as an install's would. A trial still running (its commits not promoted)
+# is finished first, as the canary does with a newer main.
+app_trial() {
+  [ -n "$app" ] && trial_is_installed || return 0
+  local head
+  head=$(git -C "$app" rev-parse HEAD)
+  [ "${t_heads[1]:-}" != "$head" ] || return 0
+  if [ -n "${STITCH_PROMOTE:-}" ] && [ -n "${t_heads[1]:-}" ] && in_trial; then
+    echo "holding the app's $(git -C "$app" rev-parse --short=12 HEAD): the trial of $(git -C "$app" rev-parse --short=12 "${t_heads[1]}") runs (not promoted yet)"
+    return 0
+  fi
+  write_trial "$have" "$(git rev-parse HEAD)" "$head"
+  echo "the app moved alone ($(git -C "$app" log --oneline -1 HEAD | cut -c1-60)): its trial begins, with the build $have"
 }
 
 # The phone: once this commit's build is healthy here, uploaded once per
@@ -306,6 +385,7 @@ testflight() {
 if [ "$have" = "$want" ] && [ "${1:-}" != "--force" ]; then
   echo "up to date ($want)"
   promote
+  app_trial
   testflight
   exit 0
 fi
@@ -335,11 +415,7 @@ rm -f "$failed_mark"
 have=$("$bin" --version 2>/dev/null | sed -n 's/^stitch [^ ]* (\(.*\))$/\1/p' || true)
 # Its trial begins: the commits it was built from (promoted by a later run,
 # before a newer main is taken).
-{
-  echo "$have"
-  date +%s
-  for repo in "${repos[@]}"; do git -C "$repo" rev-parse HEAD; done
-} >"$trial_file"
+write_trial "$have" "$(git rev-parse HEAD)" "${app:+$(git -C "$app" rev-parse HEAD)}"
 # The node restarts into it once idle (it looks every 10 s, and wants the
 # binary unchanged over two looks); under a service, the service starts it
 # again. `jobs` starts the node (or the service) if none runs.

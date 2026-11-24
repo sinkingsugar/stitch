@@ -195,6 +195,35 @@ impl World {
     std::fs::read_to_string(self.home().join(".cargo/bin/stitch")).unwrap_or_default()
   }
 
+  /// The trial began `secs` ago (the time the script reads it by: `at=`,
+  /// or the older format's line of digits).
+  fn age_trial(&self, secs: u64) {
+    let path = self.home().join(".cache/stitch-self-update.trial");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let then = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_secs()
+      - secs;
+    let text: Vec<String> = text
+      .lines()
+      .map(|l| {
+        if l.starts_with("at=") {
+          format!("at={then}")
+        } else if !l.is_empty() && l.chars().all(|c| c.is_ascii_digit()) {
+          then.to_string()
+        } else {
+          l.to_owned()
+        }
+      })
+      .collect();
+    std::fs::write(&path, text.join("\n") + "\n").unwrap();
+  }
+
+  fn trial(&self) -> String {
+    std::fs::read_to_string(self.home().join(".cache/stitch-self-update.trial")).unwrap_or_default()
+  }
+
   fn branch(&self, name: &str, branch: &str) -> Option<String> {
     let origin = self.root.join(format!("origin/{name}.git"));
     Command::new("git")
@@ -241,6 +270,7 @@ fn self_update_builds_only_origin_and_promotes_what_ran_healthy() {
 
   // Healthy for its trial: the exact commit promoted.
   write(&w.home().join("healthy"), "", false);
+  w.age_trial(2000);
   let out = w.run(&promote, &[]);
   assert!(out.contains("up to date"), "{out}");
   assert_eq!(
@@ -375,7 +405,12 @@ fn self_update_builds_only_origin_and_promotes_what_ran_healthy() {
     w.branch("app", "main").unwrap()
   );
 
-  // Promoted with Stitch, the app's exact commit too.
+  // Promoted with Stitch, the app's exact commit too, once its trial (begun
+  // when it moved alone) passed.
+  let out = w.run(&[("STITCH_PROMOTE", "fleet"), ("STITCH_APP", app)], &[]);
+  assert!(out.contains("not promoting yet"), "{out}");
+  assert_eq!(w.branch("app", "fleet"), None, "{out}");
+  w.age_trial(2000);
   let out = w.run(&[("STITCH_PROMOTE", "fleet"), ("STITCH_APP", app)], &[]);
   assert_eq!(
     w.branch("app", "fleet"),
@@ -591,6 +626,7 @@ fn the_canary_finishes_a_trial_before_taking_a_newer_main() {
 
   // Past the trial: the old build is promoted, then the new main installed.
   write(&w.home().join("healthy"), "2000", false);
+  w.age_trial(2000);
   let out = w.run(&promote, &[]);
   assert_eq!(w.branch("stitch", "fleet"), Some(old), "{out}");
   assert!(w.installed().contains(&new[..12]), "{out}");
@@ -611,4 +647,142 @@ fn the_canary_finishes_a_trial_before_taking_a_newer_main() {
   );
   assert!(!out.contains("holding "), "{out}");
   assert!(w.installed().contains(&last[..12]), "{out}");
+}
+
+/// The app checkout rides along with the core (STITCH_APP). A commit landed
+/// in the app alone is pulled with no build of the core (the app runs in no
+/// node's build), begins a trial of its own, and is promoted once that
+/// passed; the core moving alone, or both, as before. A trial file of the
+/// older format, with lines of other output before it, is still read.
+#[test]
+fn an_app_commit_alone_has_a_trial_and_is_promoted() {
+  let w = World::with("app-trial", &["stitch", "app"]);
+  let app = w.dir("app");
+  let env = [
+    ("STITCH_PROMOTE", "fleet"),
+    ("STITCH_APP", app.to_str().unwrap()),
+  ];
+  let fleet = |name: &str| w.branch(name, "fleet");
+  write(&w.home().join("healthy"), "", false);
+
+  let out = w.run(&env, &[]);
+  assert!(out.contains("built "), "{out}");
+  let c1 = w.branch("stitch", "main").unwrap();
+  let a1 = w.branch("app", "main").unwrap();
+  assert!(
+    w.trial().contains(&format!("core={c1}\napp={a1}\n")),
+    "{}",
+    w.trial()
+  );
+  w.age_trial(2000);
+  let out = w.run(&env, &[]);
+  assert_eq!(
+    (fleet("stitch"), fleet("app")),
+    (Some(c1.clone()), Some(a1.clone())),
+    "{out}"
+  );
+  // Nothing new: nothing pushed again.
+  let out = w.run(&env, &[]);
+  assert!(out.contains("promoted already"), "{out}");
+  assert!(!out.contains(" to fleet"), "{out}");
+
+  // The app alone: no build, a trial of its own, not promoted before it passed.
+  let a2 = w.upstream("app", "README", "app 2");
+  let out = w.run(&env, &[]);
+  assert!(out.contains("up to date"), "{out}");
+  assert!(!out.contains("built "), "{out}");
+  assert!(out.contains("the app moved alone"), "{out}");
+  assert!(w.trial().contains(&format!("app={a2}\n")), "{}", w.trial());
+  let out = w.run(&env, &[]);
+  assert!(out.contains("not promoting yet: the trial began"), "{out}");
+  assert_eq!(fleet("app"), Some(a1.clone()), "{out}");
+  // The app moves again during that trial: held until it is promoted.
+  write(&w.home().join("healthy"), "100000", false);
+  let a3 = w.upstream("app", "README", "app 3");
+  w.age_trial(100);
+  let out = w.run(&env, &[]);
+  assert!(out.contains("holding the app's"), "{out}");
+  assert!(w.trial().contains(&format!("app={a2}\n")), "{}", w.trial());
+  // Passed: the app's trial commit promoted (the core's unchanged), and the
+  // next one's trial begins.
+  w.age_trial(2000);
+  let out = w.run(&env, &[]);
+  assert_eq!(
+    (fleet("stitch"), fleet("app")),
+    (Some(c1.clone()), Some(a2.clone())),
+    "{out}"
+  );
+  assert!(
+    w.trial().contains(&format!("app={a3}\n")),
+    "{out}\n{}",
+    w.trial()
+  );
+  w.age_trial(2000);
+  let out = w.run(&env, &[]);
+  assert_eq!(fleet("app"), Some(a3.clone()), "{out}");
+
+  // The core alone: built, its trial, the core promoted after it.
+  let c2 = w.upstream("stitch", "README", "core 2");
+  let out = w.run(&env, &[]);
+  assert!(out.contains("built "), "{out}");
+  assert!(
+    w.trial().contains(&format!("core={c2}\napp={a3}\n")),
+    "{}",
+    w.trial()
+  );
+  let _ = w.run(&env, &[]);
+  assert_eq!(fleet("stitch"), Some(c1.clone()));
+  w.age_trial(2000);
+  let out = w.run(&env, &[]);
+  assert_eq!(
+    (fleet("stitch"), fleet("app")),
+    (Some(c2.clone()), Some(a3.clone())),
+    "{out}"
+  );
+
+  // Both: one build, one trial, both promoted.
+  let c3 = w.upstream("stitch", "README", "core 3");
+  let a4 = w.upstream("app", "README", "app 4");
+  let out = w.run(&env, &[]);
+  assert!(out.contains("built "), "{out}");
+  assert!(!out.contains("the app moved alone"), "{out}");
+  w.age_trial(2000);
+  let out = w.run(&env, &[]);
+  assert_eq!(
+    (fleet("stitch"), fleet("app")),
+    (Some(c3.clone()), Some(a4.clone())),
+    "{out}"
+  );
+
+  // A trial file of the older format (label, time, the commits by line),
+  // with four lines of other output before it, as one was found: read, its
+  // trial finished and its commits promoted.
+  let label = w
+    .trial()
+    .lines()
+    .find_map(|l| l.strip_prefix("label=").map(str::to_owned))
+    .unwrap();
+  let a5 = w.upstream("app", "README", "app 5");
+  git(&app, &["pull", "-q", "--ff-only", "origin", "main"]);
+  write(
+    &w.home().join(".cache/stitch-self-update.trial"),
+    &format!(
+      "node n (1d7c)\nbuild: {label}\nrepositories: home\npeers: a, b\n{label}\n1\n{c3}\n{a5}\n"
+    ),
+    false,
+  );
+  w.age_trial(100);
+  let out = w.run(&env, &[]);
+  assert!(out.contains("not promoting yet: the trial began"), "{out}");
+  assert!(
+    !out.contains("built ") && !out.contains("the app moved alone"),
+    "{out}"
+  );
+  w.age_trial(2000);
+  let out = w.run(&env, &[]);
+  assert_eq!(
+    (fleet("stitch"), fleet("app")),
+    (Some(c3.clone()), Some(a5.clone())),
+    "{out}"
+  );
 }
