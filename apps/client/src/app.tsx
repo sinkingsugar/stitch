@@ -163,6 +163,8 @@ function Item({ e }: { e: Entry }) {
     case "failed": return <div class="turn-failed" role="alert">{e.text}</div>;
     case "tool": return <ToolEntry e={e} />;
     case "compacted": return <Compacted e={e} />;
+    case "forked": return <Forked e={e} />;
+    case "context": return <NoteLine text={e.text} />;
     // An action button pressed: its line, the call's output folded.
     case "press": return (
       <div class={"press" + (e.ok ? "" : " failed")}>
@@ -181,6 +183,20 @@ function Compacted({ e }: { e: Extract<Entry, { kind: "compacted" }> }) {
       <div class="cmore">
         {e.summary && <details><summary>Summary</summary><Md text={e.summary} /></details>}
         {e.from && <button class="link" title={e.from} onClick={() => void S.select(e.from, true)}>the earlier thread, as it was</button>}
+      </div>
+    </div>
+  );
+}
+
+/** Where a fork leaves the history it continues (design §2.15): what its model
+ * reads of it, its summary folded, the thread it was forked from. */
+function Forked({ e }: { e: Extract<Entry, { kind: "forked" }> }) {
+  return (
+    <div class={"compacted forked" + (e.shared ? " shared" : "")}>
+      <div class="cline"><span>{e.said}</span></div>
+      <div class="cmore">
+        {e.summary && <details><summary>Summary</summary><Md text={e.summary} /></details>}
+        <button class="link" title={e.from} onClick={() => void S.select(e.from)}>open the thread it was forked from</button>
       </div>
     </div>
   );

@@ -557,6 +557,80 @@ pub struct Entry {
   /// call ended.
   #[uniffi(default = None)]
   pub press: Option<PressInfo>,
+  /// A `forked` entry's fork (design §2.15, "A fork shows what it
+  /// continues"): the divider between the history it continues and its
+  /// own messages.
+  #[uniffi(default = None)]
+  pub fork: Option<ForkInfo>,
+  /// Of the history a fork continues (before its `forked` divider): shown
+  /// read-only (no `id`: Fork and Rewind are the fork's own), with the
+  /// thread it is of and its message ID there (`source_id`, a message's
+  /// only), for "open in the original" or forking there.
+  #[uniffi(default = false)]
+  pub ancestor: bool,
+  #[uniffi(default = None)]
+  pub source_thread: Option<String>,
+  #[uniffi(default = None)]
+  pub source_id: Option<String>,
+  /// An ancestor the fork's model reads (its context); the others are
+  /// shown for the user only. A `context` entry says where it starts when
+  /// that is not the first.
+  #[uniffi(default = false)]
+  pub in_context: bool,
+  /// A message of a conversation another user shared (design §2.31):
+  /// shown as foreign.
+  #[uniffi(default = false)]
+  pub shared: bool,
+}
+
+/// Where a fork leaves the thread it continues (a `forked` entry).
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct ForkInfo {
+  /// The thread it was forked from, and its title.
+  pub from: String,
+  pub title: Option<String>,
+  /// The fork.
+  pub to: String,
+  /// When it was forked, in seconds since the epoch.
+  pub at: Option<i64>,
+  /// The message of `from` it was forked at; `None`: its latest.
+  pub upto: Option<String>,
+  /// `full`, `last` (its last `last` messages), `summary` or
+  /// `summary+last`.
+  pub how: String,
+  pub last: Option<u32>,
+  /// The summary its model reads in place of what it does not keep.
+  pub summary: Option<String>,
+  pub no_tools: bool,
+  pub no_attachments: bool,
+  /// `from` is a conversation another user shared (design §2.31): its
+  /// manifest's hash, the sender's share key, whether it signed it.
+  pub shared_from: Option<String>,
+  pub shared_source: Option<String>,
+  pub shared_signed: bool,
+  /// The divider's line.
+  pub said: String,
+}
+
+impl ForkInfo {
+  fn of(f: &stitch_node::chat::ForkPoint) -> ForkInfo {
+    ForkInfo {
+      from: f.from.clone(),
+      title: f.title.clone(),
+      to: f.to.clone(),
+      at: f.at.map(|t| t.as_second()),
+      upto: f.upto.clone(),
+      how: f.how.clone(),
+      last: f.last.map(|n| n as u32),
+      summary: f.summary.clone(),
+      no_tools: f.no_tools,
+      no_attachments: f.no_attachments,
+      shared_from: f.shared.as_ref().map(|o| o.from.clone()),
+      shared_source: f.shared.as_ref().map(|o| o.source.clone()),
+      shared_signed: f.shared.as_ref().is_some_and(|o| o.signed),
+      said: f.said.clone(),
+    }
+  }
 }
 
 /// An action button (design §2.30, step 2): its label, the call it runs
@@ -669,6 +743,9 @@ pub struct ImportedThread {
   pub mine: bool,
   pub level: String,
   pub kind: String,
+  /// When the file was made (the manifest's `created`), in seconds since
+  /// the epoch.
+  pub created: i64,
   pub messages: u32,
   pub calls: u32,
   pub attachments: u32,
@@ -3199,12 +3276,6 @@ impl Stitch {
         }
       })
       .unwrap_or_default();
-    // Each divider, its compaction: the chain's, in order.
-    let mut compactions = if shown.iter().any(|e| e.who == "compacted") {
-      self.compactions(&thread).into_iter()
-    } else {
-      Vec::new().into_iter()
-    };
     Ok(
       shown
         .into_iter()
@@ -3220,7 +3291,13 @@ impl Stitch {
               threads: s.threads as u32,
             })
             .collect(),
-          compaction: (e.who == "compacted").then(|| compactions.next()).flatten(),
+          compaction: e.compaction.as_ref().map(CompactionInfo::of),
+          fork: e.fork.as_ref().map(ForkInfo::of),
+          ancestor: e.ancestor,
+          source_thread: e.source.as_ref().map(|(t, _)| t.to_string()),
+          source_id: e.source.as_ref().and_then(|(_, m)| m.clone()),
+          in_context: e.context,
+          shared: e.shared,
           replies: e
             .replies
             .iter()
@@ -3447,37 +3524,6 @@ impl Stitch {
     })
   }
 
-  /// The compactions of `thread`'s chain up to it, oldest first: what
-  /// its transcript's `compacted` entries stand for, in their order.
-  fn compactions(&self, thread: &str) -> Vec<CompactionInfo> {
-    let Ok(id) = thread.parse::<RecordId>() else {
-      return Vec::new();
-    };
-    let index = self.index.lock().expect("index lock");
-    let mut chain = index.compaction_lineage(&id);
-    if let Some(at) = chain.iter().position(|t| t == &id) {
-      chain.truncate(at + 1);
-    }
-    chain
-      .iter()
-      .skip(1)
-      .map(|t| {
-        stitch_node::fork::compaction_of(&index, t)
-          .map(|c| CompactionInfo::of(&c))
-          .unwrap_or_else(|| CompactionInfo {
-            from: String::new(),
-            to: t.to_string(),
-            model: String::new(),
-            window: 0,
-            tokens: None,
-            kept: 0,
-            summary: String::new(),
-            said: "compacted here".into(),
-          })
-      })
-      .collect()
-  }
-
   /// `read` on a thread's records, from this node's store and index.
   fn reading<T>(
     &self,
@@ -3568,6 +3614,7 @@ impl Stitch {
           mine: i.mine,
           level: i.level.as_str().to_owned(),
           kind: i.kind,
+          created: i.created.as_second(),
           messages: i.messages as u32,
           calls: i.calls as u32,
           attachments: i.attachments as u32,

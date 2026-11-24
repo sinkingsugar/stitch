@@ -30,12 +30,26 @@ export function Msg({ e, children }: { e: Entry; children: preact.ComponentChild
   // Every message carries its durable name (`data-did`), so a digest's item
   // finds it whatever thread of the conversation it is of, shown or not.
   const marked = (c: preact.ComponentChildren) => (did ? <div class={focusDid.value === did ? "mdid focus" : "mdid"} data-did={did}>{c}</div> : <>{c}</>);
+  // What a fork continues (design §2.15): read-only here, opened where it is.
+  if ((e.kind === "user" || e.kind === "assistant") && e.ancestor) {
+    const src = e.source;
+    return (
+      <div class={"mwrap ancestor" + (e.inherited ? " inctx" : "") + (e.shared ? " shared" : "")} data-did={did}>
+        {children}
+        <div class="mact">
+          {src && <button title="Open the thread this message is of" onClick={() => void S.select(src.thread)}>Open in original</button>}
+          <button title="Quote into the message box" onClick={() => A.quote(e.text)}>Quote</button>
+          <button title="Copy the text" onClick={() => void A.copy(e.text)}>Copy</button>
+        </div>
+      </div>
+    );
+  }
   if (!tid || (e.kind !== "user" && e.kind !== "assistant") || !e.id || S.latest.value) return marked(children);
   const id = e.id;
   // What a fork inherits is its source's: only that thread can fork or rewind there.
   const own = !e.inherited;
   return (
-    <div class={"mwrap" + (A.focusMsg.value === id || (did && focusDid.value === did) ? " focus" : "") + (e.inherited ? " inherited" : "")} data-mid={id} data-did={did}>
+    <div class={"mwrap" + (A.focusMsg.value === id || (did && focusDid.value === did) ? " focus" : "") + (e.inherited ? " inherited" : "") + (e.shared ? " shared" : "")} data-mid={id} data-did={did}>
       {children}
       <div class="mact">
         {own && <button title="New thread from here" onClick={() => (A.dialog.value = { k: "fork", upto: id, preset: "fork" })}>Fork</button>}

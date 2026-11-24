@@ -1830,6 +1830,7 @@ mod tests {
       actions: Vec::new(),
       call: None,
       press: None,
+      ..Default::default()
     }
   }
 

@@ -3674,6 +3674,7 @@ async fn a_forks_transcript_shows_what_it_inherits() {
       .as_array()
       .unwrap()
       .iter()
+      .filter(|e| e["kind"] == "user" || e["kind"] == "assistant")
       .map(|e| {
         (
           e["text"].as_str().unwrap_or_default().to_owned(),
@@ -3683,14 +3684,43 @@ async fn a_forks_transcript_shows_what_it_inherits() {
       .collect()
   };
 
-  // Its last 2 messages: the source's, marked inherited; the source named.
+  // Its last 2 messages: the source's whole history shown (design §2.15,
+  // "A fork shows what it continues"), the last 2 marked as what its model
+  // reads, then its divider; the source named.
   let Reply::Forked(f1) = c.request(&fork(Some(2), false)).await.unwrap() else {
     panic!()
   };
   let t = transcript(&mut c, &f1).await;
   assert_eq!(
     texts(&t),
-    vec![("again".to_owned(), true), ("Second.".to_owned(), true)]
+    vec![
+      ("hello".to_owned(), false),
+      ("Hi.".to_owned(), false),
+      ("again".to_owned(), true),
+      ("Second.".to_owned(), true)
+    ]
+  );
+  let kinds: Vec<&str> = t["entries"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|e| e["kind"].as_str().unwrap())
+    .collect();
+  assert_eq!(
+    kinds,
+    [
+      "user",
+      "assistant",
+      "context",
+      "user",
+      "assistant",
+      "forked"
+    ]
+  );
+  let divider = t["entries"].as_array().unwrap().last().unwrap().clone();
+  assert_eq!(
+    (divider["how"].clone(), divider["last"].clone()),
+    (json!("last"), json!(2))
   );
   assert_eq!(t["forked_from"]["thread"], thread.as_str());
   // The source's own transcript is whole and has none inherited.
@@ -3713,10 +3743,30 @@ async fn a_forks_transcript_shows_what_it_inherits() {
   c.chat(&chat(Some(&f2), "go on"), |_| None).await.unwrap();
   let t = transcript(&mut c, &f2).await;
   let got = texts(&t);
-  assert!(got[0].0.contains("SUMMARY-TEXT") && got[0].1, "{got:?}");
-  assert_eq!(got[1], ("again".to_owned(), true), "{got:?}");
-  assert_eq!(got[2], ("Second.".to_owned(), true), "{got:?}");
+  // The summary is the divider's; what it keeps is marked; the fork's own
+  // message is its own.
+  let divider = t["entries"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .find(|e| e["kind"] == "forked")
+    .unwrap()
+    .clone();
+  assert_eq!(divider["how"], "summary+last");
+  assert!(
+    divider["summary"]
+      .as_str()
+      .unwrap()
+      .contains("SUMMARY-TEXT")
+  );
+  assert!(got.contains(&("again".to_owned(), true)), "{got:?}");
+  assert!(got.contains(&("Second.".to_owned(), true)), "{got:?}");
   assert!(got.iter().any(|(t, i)| t == "go on" && !i), "{got:?}");
+  assert_eq!(
+    got.iter().filter(|(t, _)| t == "again").count(),
+    1,
+    "{got:?}"
+  );
   c.request(&Request::Stop).await.unwrap();
   node.wait().await.unwrap();
 }

@@ -157,10 +157,12 @@ export interface ActionButton {
 
 /** A transcript entry; `n` numbers the lineage's events. */
 export type TranscriptEntry =
-  | { n: number; id?: string; /** The message's durable name, `<thread>#<id>` (also for an earlier thread's of a compaction chain; none for what a fork inherits): what a digest's items cite. */ mid?: string | null; inherited?: boolean; kind: "user" | "assistant"; from: string | null; at: string; text: string; images: ImageRef[]; files?: FileRef[]; /** Said in a voice call (design §2.26): a transcription, marked. */ spoken?: boolean; /** Threads and efforts attached to it (design §2.27): chips; their briefing is the model's, not shown. */ scopes?: ScopeChip[]; /** A room's reply: who said it (design §2.27). */ speaker?: Speaker; /** A participant's relayed room message. */ room_turn?: RoomTurnRef; /** Sent from here, not yet in the node's transcript. */ pending?: boolean; /** Where it stands meanwhile (transcript/outbox.ts). */ outgoing?: import("./transcript/outbox").Outgoing; /** Why it was not sent. */ failed?: string }
+  | { n: number; id?: string; /** The message's durable name, `<thread>#<id>` (also for an earlier thread's of a compaction chain, and a fork's past): what a digest's items cite. */ mid?: string | null; /** Of a fork's past: whether the fork's model reads it. */ inherited?: boolean; /** Of the history a fork continues (design §2.15): read-only here, from `source`. */ ancestor?: boolean; source?: PastSource; /** Of a conversation another user shared (design §2.31). */ shared?: boolean; kind: "user" | "assistant"; from: string | null; at: string; text: string; images: ImageRef[]; files?: FileRef[]; /** Said in a voice call (design §2.26): a transcription, marked. */ spoken?: boolean; /** Threads and efforts attached to it (design §2.27): chips; their briefing is the model's, not shown. */ scopes?: ScopeChip[]; /** A room's reply: who said it (design §2.27). */ speaker?: Speaker; /** A participant's relayed room message. */ room_turn?: RoomTurnRef; /** Sent from here, not yet in the node's transcript. */ pending?: boolean; /** Where it stands meanwhile (transcript/outbox.ts). */ outgoing?: import("./transcript/outbox").Outgoing; /** Why it was not sent. */ failed?: string }
   | {
       n: number;
       inherited?: boolean;
+      ancestor?: boolean;
+      source?: PastSource;
       kind: "tool";
       at: string;
       name: string;
@@ -191,7 +193,21 @@ export type TranscriptEntry =
    * goes on in `to`, from `summary` and its last `kept` messages. `said` is
    * the divider's line ("compacted here (162k of 200k window): summary +
    * last 10 messages"); `n` is the event it comes before. */
-  | ({ n: number; kind: "compacted"; at: string; said: string } & Compaction);
+  | ({ n: number; kind: "compacted"; at: string; said: string; /** Of the history a fork continues. */ ancestor?: boolean } & Compaction)
+  /** Where a fork leaves the history it continues (design §2.15, "A fork
+   * shows what it continues"): before it, that history (entries
+   * `ancestor`); after it, the fork's own. `how` is what its model reads of
+   * it: all, its `last` messages, a `summary`, or both; `shared` says the
+   * thread forked is a conversation another user shared. */
+  | { n: number; kind: "forked"; at: string | null; said: string; from: string; title: string | null; to: string; upto: string | null; how: "full" | "last" | "summary" | "summary+last"; last: number | null; summary: string | null; no_tools: boolean; no_attachments: boolean; shared: { from: string; source: string; signed: boolean } | null }
+  /** Where the fork's model starts reading its past, when not at its start. */
+  | { n: number; kind: "context"; text: string };
+
+/** Where an entry of a fork's past is from: its thread, a message's ID there. */
+export interface PastSource {
+  thread: string;
+  id: string | null;
+}
 
 /** `Reply::Lines([JSON.stringify(Transcript)])` of `Request::Transcript`: at
  * most 500 entries; `next` is the `after` to read the rest from. */

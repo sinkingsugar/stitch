@@ -2207,6 +2207,15 @@ pub(crate) fn inherited_from(ctx: &ChatContext<'_>, c: &Continues) -> Result<Vec
   if continues_deleted(ctx, c) {
     return Ok(shaped(Vec::new(), &c.shape));
   }
+  let events = continued_events(ctx, c)?;
+  let mut all = inherited(ctx, &c.thread)?;
+  all.extend(events);
+  Ok(shaped(without_context(all), &c.shape))
+}
+
+/// The events of the thread `c` continues, its own (not what it inherits),
+/// up to where `c` leaves it, unshaped.
+pub(crate) fn continued_events(ctx: &ChatContext<'_>, c: &Continues) -> Result<Vec<Event>> {
   let head = match &c.at {
     Upto::Segment(s) => Some(s),
     Upto::Call(_) => None,
@@ -2257,9 +2266,7 @@ pub(crate) fn inherited_from(ctx: &ChatContext<'_>, c: &Continues) -> Result<Vec
       .map_or(events.len(), |n| at + 1 + n);
     events.truncate(end);
   }
-  let mut all = inherited(ctx, &c.thread)?;
-  all.extend(events);
-  Ok(shaped(without_context(all), &c.shape))
+  Ok(events)
 }
 
 /// Whether the thread `c` continues was deleted by the user.
@@ -4462,7 +4469,7 @@ pub fn transcript_to(
 }
 
 /// A transcript entry, for clients that show more than text.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Shown {
   /// `you`, a model, `tool`, `output`, `error`, `memory`, `fork`,
   /// `failed` (a turn's model call failed: why), `note` (a room's note,
@@ -4505,6 +4512,20 @@ pub struct Shown {
   pub call: Option<String>,
   /// A press of one of those buttons (who `press`; `text` its line).
   pub press: Option<crate::actions::Press>,
+  /// A `compacted` divider's compaction (design §2.15).
+  pub compaction: Option<crate::api::Compaction>,
+  /// A `forked` divider's fork (design §2.15, "A fork shows what it
+  /// continues").
+  pub fork: Option<ForkPoint>,
+  /// Of the history a fork continues, shown before its divider: read-only
+  /// here (no `id`), its own thread and message ID (`source`, the ID for
+  /// a message only), whether the fork's model reads it (`context`).
+  pub ancestor: bool,
+  pub source: Option<(RecordId, Option<String>)>,
+  pub context: bool,
+  /// A message of a conversation shared by another user (design §2.31):
+  /// shown as foreign.
+  pub shared: bool,
 }
 
 impl Shown {
@@ -4524,6 +4545,7 @@ impl Shown {
       actions: Vec::new(),
       call: None,
       press: None,
+      ..Default::default()
     }
   }
 
@@ -4537,12 +4559,316 @@ impl Shown {
 /// conversation"): the threads `thread` was compacted from, oldest first,
 /// each compaction then said by a `compacted` entry (its divider,
 /// `Compaction::said`, as `said`; that and the summary as `text`; the
-/// summary alone as `typed`; when it was made as `at`) in place of its
-/// fork notice, then `thread`'s own entries up to `head`. Messages of the
-/// earlier threads have no `id`: IDs are per thread, and a fork or rewind
-/// from one would take it for `thread`'s. A thread never compacted reads
-/// as `transcript_shown`.
+/// summary alone as `typed`; when it was made as `at`; the compaction as
+/// `compaction`) in place of its fork notice, then `thread`'s own entries
+/// up to `head`. Messages of the earlier threads have no `id`: IDs are
+/// per thread, and a fork or rewind from one would take it for
+/// `thread`'s.
+///
+/// A fork shows what it continues (design §2.15, "A fork shows what it
+/// continues"): before the chain, the history of the thread it was forked
+/// from up to the fork point (through that thread's own compactions and
+/// forks, `fork_past`), each entry `ancestor` with its `source` and no
+/// `id`, `context` when the fork's model reads it, a `context` line where
+/// that begins when it does not begin with it, then a `forked` divider
+/// (`fork`) in place of its fork notice. What the fork inherited is not
+/// shown again.
 pub fn lineage_shown(
+  ctx: &ChatContext<'_>,
+  thread: &RecordId,
+  head: Option<&RecordId>,
+) -> Result<Vec<Shown>> {
+  let mut own = chain_shown(ctx, thread, head)?;
+  let root = {
+    let index = ctx.index.lock().expect("index lock");
+    index.compaction_lineage(thread)[0].clone()
+  };
+  let (past, context) = fork_past(ctx, &root);
+  if past.is_empty() {
+    return Ok(own);
+  }
+  if own.first().is_some_and(|e| e.who == "fork") {
+    own.remove(0);
+  }
+  let mut out = past_shown(ctx, past, &context);
+  out.extend(own);
+  Ok(out)
+}
+
+/// A `compacted` divider.
+fn compacted_shown(c: crate::api::Compaction, at: Option<Timestamp>) -> Shown {
+  let line = c.said();
+  Shown {
+    who: "compacted".into(),
+    text: format!("{line}\n\n{}", c.summary),
+    said: line,
+    typed: c.summary.clone(),
+    at,
+    compaction: Some(c),
+    ..Default::default()
+  }
+}
+
+/// Where a fork leaves the thread it continues, as its divider says it
+/// (design §2.15, "A fork shows what it continues").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ForkPoint {
+  /// The thread it was forked from, and its conversation's title.
+  pub from: String,
+  pub title: Option<String>,
+  /// The fork.
+  pub to: String,
+  /// When it was forked.
+  pub at: Option<Timestamp>,
+  /// The message of `from` it was forked at; `None`: its latest.
+  pub upto: Option<String>,
+  /// `full`, `last` (its last `last` messages), `summary`, or
+  /// `summary+last`.
+  pub how: String,
+  pub last: Option<usize>,
+  pub summary: Option<String>,
+  pub no_tools: bool,
+  pub no_attachments: bool,
+  /// `from` is a conversation another user shared (design §2.31).
+  pub shared: Option<crate::share::Origin>,
+  /// The divider's line.
+  pub said: String,
+}
+
+/// An item of the history a fork continues (`fork_past`).
+pub(crate) enum Past {
+  /// An event of `thread`.
+  Event { event: Event, thread: RecordId },
+  /// `thread` was compacted from the one before it.
+  Compacted(RecordId),
+  /// A fork starts here.
+  Forked(ForkPoint),
+}
+
+/// The fork `thread` is (one the user made: not a compaction, not a
+/// spawned thread's conversation, not of a thread deleted since): what it
+/// continues.
+fn user_fork(ctx: &ChatContext<'_>, thread: &RecordId) -> Option<Continues> {
+  let record = ctx.root.read_record(thread).ok()?;
+  let c = Continues::of(&record)?;
+  let compacted = record
+    .fields
+    .get("compacted")
+    .and_then(toml::Value::as_bool)
+    == Some(true);
+  (!compacted && record.refs.first("spawned-by").is_none() && !continues_deleted(ctx, &c))
+    .then_some(c)
+}
+
+fn fork_point(ctx: &ChatContext<'_>, fork: &RecordId, c: &Continues) -> ForkPoint {
+  let index = ctx.index.lock().expect("index lock");
+  let title = index.lineage_title(&c.thread);
+  let at = index.record(fork).ok().flatten().map(|r| r.created);
+  let shared = crate::share::origin(&index, &c.thread);
+  drop(index);
+  let summary = c.shape.summary.clone();
+  let last = c.shape.last.filter(|n| *n > 0);
+  let how = match (&summary, last) {
+    (Some(_), Some(_)) => "summary+last",
+    (Some(_), None) => "summary",
+    (None, Some(_)) => "last",
+    (None, None) => "full",
+  };
+  let mut said = format!(
+    "⑂ forked from “{}”{}",
+    title.as_deref().unwrap_or("a thread"),
+    c.shape
+      .upto
+      .as_deref()
+      .map(|m| format!(" at {m}"))
+      .unwrap_or_default()
+  );
+  said.push_str(match how {
+    "summary+last" => ": a summary, then its last messages",
+    "summary" => ": a summary of it",
+    "last" => ": its last messages",
+    _ => "",
+  });
+  if let Some(n) = last {
+    said = said.replace("its last messages", &format!("its last {n} messages"));
+  }
+  if c.shape.no_tools {
+    said.push_str(", without tool calls");
+  }
+  if c.shape.no_attachments {
+    said.push_str(", without attachments");
+  }
+  if let Some(o) = &shared {
+    said.push_str(&format!(
+      " (a conversation shared with you, {})",
+      if o.signed {
+        format!("signed by key {}…", &o.source[..o.source.len().min(16)])
+      } else {
+        "unsigned".to_owned()
+      }
+    ));
+  }
+  ForkPoint {
+    from: c.thread.to_string(),
+    title,
+    to: fork.to_string(),
+    at,
+    upto: c.shape.upto.clone(),
+    how: how.to_owned(),
+    last,
+    summary,
+    no_tools: c.shape.no_tools,
+    no_attachments: c.shape.no_attachments,
+    shared,
+    said,
+  }
+}
+
+/// The history `c` continues, as shown: the conversation of the thread it
+/// forks (its compaction chain, and what that chain's first thread was
+/// forked from, recursively), up to the fork point.
+fn history_to(ctx: &ChatContext<'_>, c: &Continues, out: &mut Vec<Past>, depth: usize) {
+  let chain = {
+    let index = ctx.index.lock().expect("index lock");
+    let mut chain = index.compaction_lineage(&c.thread);
+    if let Some(at) = chain.iter().position(|t| *t == c.thread) {
+      chain.truncate(at + 1);
+    }
+    chain
+  };
+  if depth < 16
+    && let Some(first) = chain.first()
+    && let Some(pc) = user_fork(ctx, first)
+  {
+    history_to(ctx, &pc, out, depth + 1);
+    out.push(Past::Forked(fork_point(ctx, first, &pc)));
+  }
+  for (i, t) in chain.iter().enumerate() {
+    if i > 0 {
+      out.push(Past::Compacted(t.clone()));
+    }
+    let events = if *t == c.thread {
+      continued_events(ctx, c)
+    } else {
+      thread_events(ctx, t)
+    };
+    for event in events.unwrap_or_default() {
+      out.push(Past::Event {
+        event,
+        thread: t.clone(),
+      });
+    }
+  }
+}
+
+/// What an event is known by across threads: a message by when it was
+/// written and its ID, a call and its result by the call's ID.
+pub(crate) fn event_key(e: &Event) -> String {
+  match e {
+    Event::Msg(m) => format!("m {} {}", m.at, m.id),
+    Event::ToolCall(c) => format!("c {}", c.id),
+    Event::ToolResult(r) => format!("r {}", r.id),
+    other => other.to_value().to_string(),
+  }
+}
+
+/// The history the fork `root` (a compaction chain's first thread)
+/// continues, ending with its `forked` divider; and the keys of the
+/// events its model reads of it. Empty when `root` is not a fork the user
+/// made.
+pub(crate) fn fork_past(
+  ctx: &ChatContext<'_>,
+  root: &RecordId,
+) -> (Vec<Past>, std::collections::HashSet<String>) {
+  let Some(c) = user_fork(ctx, root) else {
+    return Default::default();
+  };
+  let mut out = Vec::new();
+  history_to(ctx, &c, &mut out, 0);
+  out.push(Past::Forked(fork_point(ctx, root, &c)));
+  let context = inherited(ctx, root)
+    .unwrap_or_default()
+    .iter()
+    .map(event_key)
+    .collect();
+  (out, context)
+}
+
+/// `fork_past` as transcript entries.
+fn past_shown(
+  ctx: &ChatContext<'_>,
+  past: Vec<Past>,
+  context: &std::collections::HashSet<String>,
+) -> Vec<Shown> {
+  let mut out: Vec<Shown> = Vec::new();
+  let mut marked = false;
+  let mut outside = false;
+  for p in past {
+    match p {
+      Past::Event { event, thread } => {
+        let in_context = context.contains(&event_key(&event));
+        let from = out.len();
+        push_shown(event, &mut out);
+        if from < out.len() && in_context && outside && !marked {
+          out.insert(
+            from,
+            Shown::of(
+              "context",
+              "── the fork's model reads from here on ──".to_owned(),
+            ),
+          );
+          marked = true;
+        }
+        for e in out.iter_mut().skip(from) {
+          if e.who == "context" {
+            continue;
+          }
+          e.ancestor = true;
+          e.context = in_context;
+          e.source = Some((thread.clone(), e.id.take()));
+        }
+        if !in_context && from < out.len() {
+          outside = true;
+        }
+        if in_context {
+          marked = true;
+        }
+      }
+      Past::Compacted(t) => {
+        let (c, at) = {
+          let index = ctx.index.lock().expect("index lock");
+          (
+            crate::fork::compaction_of(&index, &t).unwrap_or_default(),
+            index.record(&t).ok().flatten().map(|r| r.created),
+          )
+        };
+        let mut e = compacted_shown(c, at);
+        e.ancestor = true;
+        e.source = Some((t, None));
+        out.push(e);
+      }
+      Past::Forked(f) => {
+        let text = match &f.summary {
+          Some(s) => format!("{}\n\n{s}", f.said),
+          None => f.said.clone(),
+        };
+        out.push(Shown {
+          who: "forked".into(),
+          text,
+          said: f.said.clone(),
+          typed: f.summary.clone().unwrap_or_default(),
+          at: f.at,
+          fork: Some(f),
+          ..Default::default()
+        });
+      }
+    }
+  }
+  out
+}
+
+/// The compaction chain alone (`lineage_shown` without a fork's past).
+fn chain_shown(
   ctx: &ChatContext<'_>,
   thread: &RecordId,
   head: Option<&RecordId>,
@@ -4578,23 +4904,7 @@ pub fn lineage_shown(
           index.record(t).ok().flatten().map(|r| r.created),
         )
       };
-      let line = c.said();
-      out.push(Shown {
-        who: "compacted".into(),
-        text: format!("{line}\n\n{}", c.summary),
-        said: line,
-        typed: c.summary,
-        id: None,
-        at,
-        attachments: Vec::new(),
-        spoken: false,
-        scopes: Vec::new(),
-        room_turn: None,
-        replies: Vec::new(),
-        actions: Vec::new(),
-        call: None,
-        press: None,
-      });
+      out.push(compacted_shown(c, at));
     }
     if !last {
       for e in &mut shown {
@@ -4662,191 +4972,195 @@ pub fn transcript_shown(
   }
   for s in segments {
     for e in s.events {
-      match e {
-        Event::Msg(m) if unshown(&m) => {}
-        Event::Msg(m) => {
-          let (mut text, mut said, mut typed, mut attachments) =
-            (String::new(), String::new(), String::new(), Vec::new());
-          let spoken = m
-            .parts
-            .iter()
-            .any(|p| matches!(p, Part::Spoken { spoken: true, .. }));
-          let mut scopes = Vec::new();
-          let mut room_turn = None;
-          for p in &m.parts {
-            let line = match p {
-              // Two notes woven into one message (a report and another)
-              // are shown apart, not run together.
-              Part::Text { text: t } => {
-                if !text.is_empty() && !text.ends_with('\n') && !t.is_empty() {
-                  text.push_str("\n\n");
-                }
-                if !said.is_empty() && !said.ends_with('\n') && !t.is_empty() {
-                  said.push_str("\n\n");
-                }
-                if !typed.is_empty() && !typed.ends_with('\n') && !t.is_empty() {
-                  typed.push_str("\n\n");
-                }
-                said.push_str(t);
-                typed.push_str(t);
-                t.clone()
-              }
-              Part::Attachment { att } => {
-                attachments.push(att.clone());
-                text.push_str(&format!(
-                  "\n[{} {}]",
-                  att.media_type,
-                  att.name.as_deref().unwrap_or("")
-                ));
-                continue;
-              }
-              Part::Context { .. } => "[instructions updated]\n".into(),
-              Part::Recalled { .. } => "[memories recalled]\n".into(),
-              // Chips in clients (`scopes`); a line in the plain
-              // transcript, never the briefing itself.
-              Part::Scope { scopes: items, .. } => {
-                scopes.extend(items.iter().cloned());
-                let named: Vec<String> = items
-                  .iter()
-                  .map(|i| match &i.title {
-                    Some(t) => format!("{} {} \"{t}\"", i.kind.as_str(), i.id),
-                    None => format!("{} {}", i.kind.as_str(), i.id),
-                  })
-                  .collect();
-                text.push_str(&format!("\n[scope: {}]", named.join("; ")));
-                continue;
-              }
-              // A participant's private thread: where the relay stood,
-              // never the room's note itself.
-              Part::RoomTurn { room, upto, .. } => {
-                room_turn = Some((room.clone(), upto.clone()));
-                text.push_str(&format!("\n[room turn up to {room}#{upto}]"));
-                continue;
-              }
-              // Said, not typed: the message reads the same.
-              Part::Spoken { .. } | Part::Other(_) => continue,
-            };
-            if !matches!(p, Part::Text { .. }) {
-              said.push_str(&line);
-            }
-            text.push_str(&line);
-          }
-          // A declined follow-up (only memory's markers) is never shown.
-          if m.role == Role::Assistant && stitch_memory::marker_only(&text) {
-            continue;
-          }
-          let text = stitch_memory::without_markers(&text);
-          if text.is_empty() && m.role == Role::Assistant {
-            continue;
-          }
-          let said = stitch_memory::without_markers(&said);
-          let typed = stitch_memory::without_markers(&typed);
-          let who = match m.role {
-            Role::User if m.from.as_deref() == Some("tool") => "output".to_owned(),
-            Role::User if m.from.as_deref() == Some("memory") => "memory".to_owned(),
-            Role::User => "you".to_owned(),
-            // A room's reply: who said it, then on what.
-            Role::Assistant => match (
-              m.from.as_deref().and_then(crate::rooms::speaker_of),
-              m.model,
-            ) {
-              (Some((slug, _)), Some(model)) => format!("{slug} · {model}"),
-              (Some((slug, _)), None) => slug,
-              (None, model) => model.unwrap_or_else(|| "assistant".into()),
-            },
-            Role::System => "system".into(),
-          };
-          out.push(Shown {
-            who,
-            text,
-            said,
-            typed,
-            id: Some(m.id),
-            at: Some(m.at),
-            attachments,
-            spoken,
-            scopes,
-            room_turn,
-            replies: Vec::new(),
-            actions: Vec::new(),
-            call: None,
-            press: None,
-          });
-        }
-        Event::ToolCall(c) => {
-          let mut e = Shown::of("tool", call_summary(&c.name, &c.input));
-          e.replies = crate::replies::of_call(&c.name, &c.input).unwrap_or_default();
-          e.actions = crate::actions::of_call(&c.name, &c.input).unwrap_or_default();
-          e.call = Some(c.id);
-          out.push(e);
-        }
-        Event::ToolResult(r) => {
-          // A refused set offers nothing.
-          if !r.ok
-            && let Some(e) = out
-              .iter_mut()
-              .rev()
-              .find(|e| e.call.as_deref() == Some(r.id.as_str()))
-          {
-            e.actions.clear();
-          }
-          let text = result_text(&r.output);
-          let lines: Vec<&str> = text.lines().collect();
-          let shown = if lines.len() > 12 {
-            format!(
-              "{}\n[… {} more lines]",
-              lines[..12].join("\n"),
-              lines.len() - 12
-            )
-          } else {
-            text.clone()
-          };
-          out.push(Shown::of(if r.ok { "output" } else { "error" }, shown));
-        }
-        Event::Other(v) if v.get("t").and_then(Value::as_str) == Some("refusal") => {
-          out.push(Shown::of("refusal", v.to_string()));
-        }
-        // A room's note (design §2.27: a participant's question settled):
-        // a quiet line, no message.
-        ref e if crate::rooms::note_of(e).is_some() => {
-          let mut shown = Shown::of(
-            "note",
-            crate::rooms::note_of(e).unwrap_or_default().to_owned(),
-          );
-          if let Event::Other(v) = e {
-            shown.at = v
-              .get("at")
-              .and_then(Value::as_str)
-              .and_then(|a| a.parse().ok());
-          }
-          out.push(shown);
-        }
-        // A turn whose model call failed: why, as the user was told.
-        e @ Event::Other(_) if is_failed(&e) => {
-          out.push(Shown::of("failed", crate::failed::shown(&e)));
-        }
-        // An action button pressed (design §2.30): its line.
-        e @ Event::Other(_) if crate::actions::Press::of(&e).is_some() => {
-          let p = crate::actions::Press::of(&e).expect("a press");
-          // Its line as `said`, with its output's first lines as `text`.
-          let mut shown = Shown::of("press", p.said());
-          let lines: Vec<&str> = p.output.trim().lines().collect();
-          if !lines.is_empty() {
-            shown.text = format!("{}\n{}", p.said(), lines[..lines.len().min(12)].join("\n"));
-            if lines.len() > 12 {
-              shown
-                .text
-                .push_str(&format!("\n[… {} more lines]", lines.len() - 12));
-            }
-          }
-          shown.press = Some(p);
-          out.push(shown);
-        }
-        _ => {}
-      }
+      push_shown(e, &mut out);
     }
   }
   Ok(out)
+}
+
+/// One event as transcript entries (none, or one), pushed on `out`: a
+/// refused action set's buttons on the entry before it are cleared.
+fn push_shown(e: Event, out: &mut Vec<Shown>) {
+  match e {
+    Event::Msg(m) if unshown(&m) => {}
+    Event::Msg(m) => {
+      let (mut text, mut said, mut typed, mut attachments) =
+        (String::new(), String::new(), String::new(), Vec::new());
+      let spoken = m
+        .parts
+        .iter()
+        .any(|p| matches!(p, Part::Spoken { spoken: true, .. }));
+      let mut scopes = Vec::new();
+      let mut room_turn = None;
+      for p in &m.parts {
+        let line = match p {
+          // Two notes woven into one message (a report and another)
+          // are shown apart, not run together.
+          Part::Text { text: t } => {
+            if !text.is_empty() && !text.ends_with('\n') && !t.is_empty() {
+              text.push_str("\n\n");
+            }
+            if !said.is_empty() && !said.ends_with('\n') && !t.is_empty() {
+              said.push_str("\n\n");
+            }
+            if !typed.is_empty() && !typed.ends_with('\n') && !t.is_empty() {
+              typed.push_str("\n\n");
+            }
+            said.push_str(t);
+            typed.push_str(t);
+            t.clone()
+          }
+          Part::Attachment { att } => {
+            attachments.push(att.clone());
+            text.push_str(&format!(
+              "\n[{} {}]",
+              att.media_type,
+              att.name.as_deref().unwrap_or("")
+            ));
+            continue;
+          }
+          Part::Context { .. } => "[instructions updated]\n".into(),
+          Part::Recalled { .. } => "[memories recalled]\n".into(),
+          // Chips in clients (`scopes`); a line in the plain
+          // transcript, never the briefing itself.
+          Part::Scope { scopes: items, .. } => {
+            scopes.extend(items.iter().cloned());
+            let named: Vec<String> = items
+              .iter()
+              .map(|i| match &i.title {
+                Some(t) => format!("{} {} \"{t}\"", i.kind.as_str(), i.id),
+                None => format!("{} {}", i.kind.as_str(), i.id),
+              })
+              .collect();
+            text.push_str(&format!("\n[scope: {}]", named.join("; ")));
+            continue;
+          }
+          // A participant's private thread: where the relay stood,
+          // never the room's note itself.
+          Part::RoomTurn { room, upto, .. } => {
+            room_turn = Some((room.clone(), upto.clone()));
+            text.push_str(&format!("\n[room turn up to {room}#{upto}]"));
+            continue;
+          }
+          // Said, not typed: the message reads the same.
+          Part::Spoken { .. } | Part::Other(_) => continue,
+        };
+        if !matches!(p, Part::Text { .. }) {
+          said.push_str(&line);
+        }
+        text.push_str(&line);
+      }
+      // A declined follow-up (only memory's markers) is never shown.
+      if m.role == Role::Assistant && stitch_memory::marker_only(&text) {
+        return;
+      }
+      let text = stitch_memory::without_markers(&text);
+      if text.is_empty() && m.role == Role::Assistant {
+        return;
+      }
+      let said = stitch_memory::without_markers(&said);
+      let typed = stitch_memory::without_markers(&typed);
+      let who = match m.role {
+        Role::User if m.from.as_deref() == Some("tool") => "output".to_owned(),
+        Role::User if m.from.as_deref() == Some("memory") => "memory".to_owned(),
+        Role::User => "you".to_owned(),
+        // A room's reply: who said it, then on what.
+        Role::Assistant => match (
+          m.from.as_deref().and_then(crate::rooms::speaker_of),
+          m.model,
+        ) {
+          (Some((slug, _)), Some(model)) => format!("{slug} · {model}"),
+          (Some((slug, _)), None) => slug,
+          (None, model) => model.unwrap_or_else(|| "assistant".into()),
+        },
+        Role::System => "system".into(),
+      };
+      out.push(Shown {
+        who,
+        text,
+        said,
+        typed,
+        shared: crate::share::is_shared(m.from.as_deref()),
+        id: Some(m.id),
+        at: Some(m.at),
+        attachments,
+        spoken,
+        scopes,
+        room_turn,
+        ..Default::default()
+      });
+    }
+    Event::ToolCall(c) => {
+      let mut e = Shown::of("tool", call_summary(&c.name, &c.input));
+      e.replies = crate::replies::of_call(&c.name, &c.input).unwrap_or_default();
+      e.actions = crate::actions::of_call(&c.name, &c.input).unwrap_or_default();
+      e.call = Some(c.id);
+      out.push(e);
+    }
+    Event::ToolResult(r) => {
+      // A refused set offers nothing.
+      if !r.ok
+        && let Some(e) = out
+          .iter_mut()
+          .rev()
+          .find(|e| e.call.as_deref() == Some(r.id.as_str()))
+      {
+        e.actions.clear();
+      }
+      let text = result_text(&r.output);
+      let lines: Vec<&str> = text.lines().collect();
+      let shown = if lines.len() > 12 {
+        format!(
+          "{}\n[… {} more lines]",
+          lines[..12].join("\n"),
+          lines.len() - 12
+        )
+      } else {
+        text.clone()
+      };
+      out.push(Shown::of(if r.ok { "output" } else { "error" }, shown));
+    }
+    Event::Other(v) if v.get("t").and_then(Value::as_str) == Some("refusal") => {
+      out.push(Shown::of("refusal", v.to_string()));
+    }
+    // A room's note (design §2.27: a participant's question settled):
+    // a quiet line, no message.
+    ref e if crate::rooms::note_of(e).is_some() => {
+      let mut shown = Shown::of(
+        "note",
+        crate::rooms::note_of(e).unwrap_or_default().to_owned(),
+      );
+      if let Event::Other(v) = e {
+        shown.at = v
+          .get("at")
+          .and_then(Value::as_str)
+          .and_then(|a| a.parse().ok());
+      }
+      out.push(shown);
+    }
+    // A turn whose model call failed: why, as the user was told.
+    e @ Event::Other(_) if is_failed(&e) => {
+      out.push(Shown::of("failed", crate::failed::shown(&e)));
+    }
+    // An action button pressed (design §2.30): its line.
+    e @ Event::Other(_) if crate::actions::Press::of(&e).is_some() => {
+      let p = crate::actions::Press::of(&e).expect("a press");
+      // Its line as `said`, with its output's first lines as `text`.
+      let mut shown = Shown::of("press", p.said());
+      let lines: Vec<&str> = p.output.trim().lines().collect();
+      if !lines.is_empty() {
+        shown.text = format!("{}\n{}", p.said(), lines[..lines.len().min(12)].join("\n"));
+        if lines.len() > 12 {
+          shown
+            .text
+            .push_str(&format!("\n[… {} more lines]", lines.len() - 12));
+        }
+      }
+      shown.press = Some(p);
+      out.push(shown);
+    }
+    _ => {}
+  }
 }
 
 /// A tool call as one line: `$ command` for the shell.

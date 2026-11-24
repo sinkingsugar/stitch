@@ -653,6 +653,41 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
     .await
     .unwrap();
   assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
+  // The fork shows the imported history it continues (design §2.15), as
+  // shared, read-only, and a divider saying whose it was.
+  let shown = transcript(&mut c, &f).await;
+  let divider = shown.iter().position(|e| e["kind"] == "forked").unwrap();
+  assert_eq!(shown[divider]["shared"]["from"], json!(i.hash), "{shown:?}");
+  assert_eq!(shown[divider]["shared"]["signed"], json!(true));
+  assert!(
+    shown[divider]["said"]
+      .as_str()
+      .unwrap()
+      .contains("a conversation shared with you")
+  );
+  let past = &shown[..divider];
+  assert!(past.iter().any(|e| e["kind"] == "note"));
+  let said: Vec<&Value> = past
+    .iter()
+    .filter(|e| e["kind"] == "user" || e["kind"] == "assistant")
+    .collect();
+  assert!(!said.is_empty());
+  assert!(
+    said
+      .iter()
+      .all(|e| e["ancestor"] == true && e["id"].is_null())
+  );
+  assert!(
+    said
+      .iter()
+      .filter(|e| e["from"].as_str().is_some_and(|f| f.starts_with("shared:")))
+      .all(|e| e["shared"] == true)
+  );
+  assert!(
+    said
+      .iter()
+      .all(|e| e["source"]["thread"] == json!(i.thread))
+  );
   // The rows say which thread was imported, and from where; not its fork.
   for (t, imported) in [(&i.thread, true), (&f, false)] {
     let Reply::Lines(l) = c

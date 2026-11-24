@@ -114,6 +114,8 @@ impl Entry {
           | "memory"
           | "fork"
           | "compacted"
+          | "forked"
+          | "context"
           | "system"
           | "press"
           | "note"
@@ -167,8 +169,11 @@ impl Printed {
       "memory" => Printed::Notice("memory: an afterthought".into()),
       // What a fork continues from (`/fork`, `/summarize`, `/compact`).
       "fork" => Printed::Notice(e.text.clone()),
-      // Where its compaction continued it (`chat::lineage_shown`).
-      "compacted" => Printed::Compacted {
+      // Where the model's reading of what a fork continues starts.
+      "context" => Printed::Notice(e.text.clone()),
+      // Where its compaction continued it, or where a fork leaves what it
+      // continues (`chat::lineage_shown`): a dimmed divider, its summary.
+      "compacted" | "forked" => Printed::Compacted {
         line: e.said().to_owned(),
         summary: e
           .text
@@ -352,9 +357,12 @@ pub fn fork_keeps(entries: &[Entry], f: &ForkForm) -> ForkKeeps {
   // compaction is not this thread's (it inherits a summary of it).
   let own = entries
     .iter()
-    .rposition(|e| e.who == "compacted")
+    .rposition(|e| e.who == "compacted" || e.who == "forked")
     .map_or(0, |i| i + 1);
-  let mut es: Vec<&Entry> = entries[own..].iter().filter(|e| e.who != "fork").collect();
+  let mut es: Vec<&Entry> = entries[own..]
+    .iter()
+    .filter(|e| e.who != "fork" && e.who != "context")
+    .collect();
   if f.upto_on
     && let Some(m) = &f.upto
     && let Some(i) = es.iter().position(|e| e.id.as_deref() == Some(m))
@@ -1354,6 +1362,8 @@ impl App {
           | "memory"
           | "failed"
           | "compacted"
+          | "forked"
+          | "context"
           | "press"
           | "note"
       )
@@ -2254,7 +2264,10 @@ impl App {
     // A fork's own transcript holds only its messages, not those it
     // continues: what it reads from its parent is not counted.
     let parent = if self.entries.first().is_some_and(|e| e.who == "fork")
-      || self.entries.iter().any(|e| e.who == "compacted")
+      || self
+        .entries
+        .iter()
+        .any(|e| e.who == "compacted" || e.who == "forked")
     {
       " (+ what this thread continues)"
     } else {
@@ -2588,6 +2601,8 @@ impl App {
             | "failed"
             | "fork"
             | "compacted"
+            | "forked"
+            | "context"
             | "note"
         )
       })

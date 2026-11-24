@@ -3221,12 +3221,17 @@ mod tests {
     app.threads = store.threads(ThreadScope::All);
     app.opened(Some(parent.to_string()), &store.transcript(parent.as_str()));
     app.out.clear();
-    // Forked: its separator and notice.
+    // Forked: its separator, the history it continues up to m2 (design
+    // §2.15), and its divider.
     app.opened(Some(fork.to_string()), &store.transcript(fork.as_str()));
     let shown: Vec<String> = app.out.iter().map(|p| format!("{p:?}")).collect();
-    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert_eq!(shown.len(), 4, "{shown:?}");
     assert!(
-      shown[1].contains("continues thread") && shown[1].contains("up to m2"),
+      shown[1].contains("hello") && shown[2].contains("hi"),
+      "{shown:?}"
+    );
+    assert!(
+      shown[3].contains("forked from") && shown[3].contains("at m2"),
       "{shown:?}"
     );
     app.out.clear();

@@ -2247,17 +2247,26 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
     before,
     tail,
   } = window;
-  let (marked, members) = lineage_marked(s, thread, true, true);
-  let inherited: std::collections::HashSet<usize> = marked
+  let (marked, members) = lineage_marked(s, thread, false, true);
+  // A fork shows what it continues (design §2.15): the history of the
+  // thread it was forked from up to the fork point, before its own; its
+  // dividers (`compacted`, `context`, `forked`) by the event they come
+  // before, and each event's thread and whether the fork's model reads it.
+  let (past_events, past_of, past_dividers) = fork_past_json(s, &members);
+  let a = past_events.len();
+  let inherited: std::collections::HashSet<usize> = past_of
     .iter()
     .enumerate()
-    .filter(|(_, (_, i, _))| *i)
+    .filter(|(_, (_, c))| *c)
     .map(|(n, _)| n)
     .collect();
   // Which thread of the lineage each event is of: a message of an earlier
   // one has no `id` (IDs are per thread: `Fork` and `Rewind` would take
-  // it for the newest's message of that number).
-  let member: Vec<usize> = marked.iter().map(|(_, _, m)| *m).collect();
+  // it for the newest's message of that number). The past's events are
+  // no member's.
+  let member: Vec<usize> = std::iter::repeat_n(usize::MAX, a)
+    .chain(marked.iter().map(|(_, _, m)| *m))
+    .collect();
   let last = members.len().saturating_sub(1);
   // Where each compaction starts: its divider goes before its first event
   // (at the end when it has none yet).
@@ -2269,7 +2278,10 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
       .skip(1)
       .filter_map(|(i, t)| {
         let c = crate::fork::compaction_of(&index, t)?;
-        let at = member.iter().position(|m| *m >= i).unwrap_or(member.len());
+        let at = member
+          .iter()
+          .position(|m| *m >= i && *m != usize::MAX)
+          .unwrap_or(member.len());
         let when = index
           .record(t)
           .ok()
@@ -2288,7 +2300,7 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
       .collect()
   };
   let divider = |n: usize, out: &mut Vec<Value>| {
-    for (at, d) in &compactions {
+    for (at, d) in past_dividers.iter().chain(&compactions) {
       if *at == n {
         let mut d = d.clone();
         d["n"] = json!(n);
@@ -2296,7 +2308,8 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
       }
     }
   };
-  let mut events: Vec<Event> = marked.into_iter().map(|(e, ..)| e).collect();
+  let mut events: Vec<Event> = past_events;
+  events.extend(marked.into_iter().map(|(e, ..)| e));
   let mut next = events.len() as u64;
   // The step a loop here runs the calls of is written when they are done:
   // until then it is read from what the loop keeps, so a client opening
@@ -2360,10 +2373,9 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
     // A page: the rest is read from `next` (a divider at `n` with it).
     if tail.is_none() && out.len() >= MESSAGES_MAX {
       next = n as u64;
-      while out
-        .last()
-        .is_some_and(|l: &Value| l["kind"] == "compacted" && l["n"] == json!(n))
-      {
+      while out.last().is_some_and(|l: &Value| {
+        matches!(l["kind"].as_str(), Some("compacted" | "forked" | "context")) && l["n"] == json!(n)
+      }) {
         out.pop();
       }
       ended = true;
@@ -2562,6 +2574,28 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
       _ => {}
     }
   }
+  // The past's entries: read-only here, with their own thread and ID.
+  for e in &mut out {
+    if e["from"]
+      .as_str()
+      .is_some_and(|f| f.starts_with(crate::share::FROM_PREFIX))
+    {
+      e["shared"] = json!(true);
+    }
+    let n = e["n"].as_u64().unwrap_or(u64::MAX) as usize;
+    if n >= a || matches!(e["kind"].as_str(), Some("compacted" | "forked" | "context")) {
+      continue;
+    }
+    let (t, _) = &past_of[n];
+    let id = e.get("id").cloned().unwrap_or(Value::Null);
+    e["id"] = Value::Null;
+    e["ancestor"] = json!(true);
+    e["source"] = json!({"thread": t.to_string(), "id": id});
+    e["mid"] = match id.as_str() {
+      Some(m) => json!(format!("{t}#{m}")),
+      None => Value::Null,
+    };
+  }
   // A fork's source, for a "forked from" link (a spawned thread's is its
   // parent; a compaction's is the same conversation, above its divider).
   let forked_from = {
@@ -2603,6 +2637,91 @@ pub(crate) fn transcript(s: &Arc<Shared>, thread: &RecordId, window: Window) -> 
     v["room"] = info;
   }
   v
+}
+
+/// The history a fork continues (`chat::fork_past`), for `transcript`:
+/// its events, each event's thread and whether the fork's model reads it,
+/// and its dividers by the event they come before (`compacted` of the
+/// forked thread's chain, `context` where the model's reading starts when
+/// it starts later, `forked`). Nothing for a thread that is not a fork.
+#[allow(clippy::type_complexity)]
+fn fork_past_json(
+  s: &Shared,
+  members: &[RecordId],
+) -> (Vec<Event>, Vec<(RecordId, bool)>, Vec<(usize, Value)>) {
+  let (mut events, mut of, mut dividers) = (Vec::new(), Vec::new(), Vec::new());
+  let Some(root) = members.first() else {
+    return (events, of, dividers);
+  };
+  let Ok((r, _)) = s.thread_place(root) else {
+    return (events, of, dividers);
+  };
+  let state = s.state();
+  let ctx = crate::chat::ChatContext {
+    node: &state.node,
+    root: &r,
+    index: &state.index,
+    blobs: &state.blobs,
+  };
+  let (past, context) = crate::chat::fork_past(&ctx, root);
+  let (mut marked, mut outside) = (false, false);
+  for p in past {
+    match p {
+      crate::chat::Past::Event { event, thread } => {
+        let c = context.contains(&crate::chat::event_key(&event));
+        if c && outside && !marked {
+          dividers.push((
+            events.len(),
+            json!({"kind": "context", "text": "── the fork's model reads from here on ──"}),
+          ));
+        }
+        marked |= c;
+        outside |= !c;
+        events.push(event);
+        of.push((thread, c));
+      }
+      crate::chat::Past::Compacted(t) => {
+        let index = state.index.lock().expect("index lock");
+        if let Some(c) = crate::fork::compaction_of(&index, &t) {
+          let when = index
+            .record(&t)
+            .ok()
+            .flatten()
+            .map(|r| r.created.to_string())
+            .unwrap_or_default();
+          dividers.push((
+            events.len(),
+            json!({
+              "kind": "compacted", "at": when, "said": c.said(), "from": c.from, "to": c.to,
+              "model": c.model, "window": c.window, "tokens": c.tokens, "kept": c.kept,
+              "summary": c.summary, "ancestor": true,
+            }),
+          ));
+        }
+      }
+      crate::chat::Past::Forked(f) => dividers.push((events.len(), fork_json(&f))),
+    }
+  }
+  (events, of, dividers)
+}
+
+/// A `forked` divider (`chat::ForkPoint`).
+pub(crate) fn fork_json(f: &crate::chat::ForkPoint) -> Value {
+  json!({
+    "kind": "forked",
+    "at": f.at.map(|t| t.to_string()),
+    "said": f.said,
+    "from": f.from,
+    "title": f.title,
+    "to": f.to,
+    "upto": f.upto,
+    "how": f.how,
+    "last": f.last,
+    "summary": f.summary,
+    "no_tools": f.no_tools,
+    "no_attachments": f.no_attachments,
+    "shared": f.shared.as_ref().map(|o| json!({"from": o.from, "source": o.source, "signed": o.signed})),
+  })
 }
 
 /// What part of a transcript `transcript` reads (`Request::Transcript`).
