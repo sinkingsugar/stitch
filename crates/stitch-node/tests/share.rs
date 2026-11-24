@@ -575,6 +575,13 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
     "{entries:?}"
   );
   assert!(
+    entries[0]["text"]
+      .as_str()
+      .unwrap()
+      .contains("signed by your own key"),
+    "{entries:?}"
+  );
+  assert!(
     !entries.iter().any(|e| e["text"]
       .as_str()
       .is_some_and(|t| t.contains("another person shared"))),
@@ -663,8 +670,9 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
     shown[divider]["said"]
       .as_str()
       .unwrap()
-      .contains("a conversation shared with you")
+      .contains("a conversation shared with you, signed by your own key")
   );
+  assert_eq!(shown[divider]["shared"]["own"], json!(true));
   let past = &shown[..divider];
   assert!(past.iter().any(|e| e["kind"] == "note"));
   let said: Vec<&Value> = past
@@ -716,6 +724,7 @@ async fn a_conversation_goes_out_as_a_file_and_comes_back_foreign() {
       assert_eq!(row["imported_from"], json!(i.hash), "{row}");
       assert_eq!(row["imported_source"], json!(i.signer.clone().unwrap()));
       assert_eq!(row["imported_signed"], json!(true));
+      assert_eq!(row["imported_own"], json!(true));
     } else {
       assert!(row.get("imported_from").is_none(), "{row}");
     }

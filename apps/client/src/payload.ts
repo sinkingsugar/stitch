@@ -54,6 +54,8 @@ export interface ThreadRow {
   imported_from?: string;
   imported_source?: string;
   imported_signed?: boolean;
+  /** Signed by your own key (the importing node's). */
+  imported_own?: boolean;
 }
 
 /** One of a room's participants (`rooms::participants`): its `@slug`, how
@@ -199,7 +201,7 @@ export type TranscriptEntry =
    * `ancestor`); after it, the fork's own. `how` is what its model reads of
    * it: all, its `last` messages, a `summary`, or both; `shared` says the
    * thread forked is a conversation another user shared. */
-  | { n: number; kind: "forked"; at: string | null; said: string; from: string; title: string | null; to: string; upto: string | null; how: "full" | "last" | "summary" | "summary+last"; last: number | null; summary: string | null; no_tools: boolean; no_attachments: boolean; shared: { from: string; source: string; signed: boolean } | null }
+  | { n: number; kind: "forked"; at: string | null; said: string; from: string; title: string | null; to: string; upto: string | null; how: "full" | "last" | "summary" | "summary+last"; last: number | null; summary: string | null; no_tools: boolean; no_attachments: boolean; shared: { from: string; source: string; signed: boolean; own: boolean } | null }
   /** Where the fork's model starts reading its past, when not at its start. */
   | { n: number; kind: "context"; text: string };
 

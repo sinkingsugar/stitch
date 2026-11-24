@@ -637,6 +637,7 @@ pub(crate) fn threads(
         row["imported_from"] = json!(o.from);
         row["imported_source"] = json!(o.source);
         row["imported_signed"] = json!(o.signed);
+        row["imported_own"] = json!(o.own);
       }
     }
     out.push(row);

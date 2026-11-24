@@ -1716,6 +1716,9 @@ pub struct Origin {
   pub from: String,
   pub source: String,
   pub signed: bool,
+  /// Signed by the share key of the node that imported it: the user's
+  /// own (a file they shared and took back).
+  pub own: bool,
 }
 
 /// `thread`'s origin when it was imported: from its record, or from the
@@ -1730,6 +1733,7 @@ pub fn origin(index: &stitch_store::Index, thread: &RecordId) -> Option<Origin> 
       from: field("imported_from")?,
       source: field("imported_source").unwrap_or_default(),
       signed: r.fields.get("imported_signed").and_then(Value::as_bool) == Some(true),
+      own: r.fields.get("imported_own").and_then(Value::as_bool) == Some(true),
     })
   })
 }
@@ -1961,7 +1965,7 @@ pub(crate) fn import(s: &Arc<Shared>, bytes: &[u8], write: bool) -> Result<Impor
     .collect();
   let (root, place) = s.placement(None, true, &(crate::place::Place::Global, None))?;
   let signed = match (&o.signer, mine) {
-    (Some(_), true) => "signed by this node's own key".to_owned(),
+    (Some(_), true) => "signed by your own key (this node's)".to_owned(),
     (Some(k), false) => format!("signed by key {}…", short(k)),
     (None, _) => "unsigned".to_owned(),
   };
@@ -1975,6 +1979,7 @@ pub(crate) fn import(s: &Arc<Shared>, bytes: &[u8], write: bool) -> Result<Impor
       .field("imported_from", o.manifest_hash.as_str())?
       .field("imported_source", o.manifest.source.as_str())?
       .field("imported_signed", o.signer.is_some())?
+      .field("imported_own", mine)?
       .field("imported_label", t.label.as_str())?
       .field("imported_level", o.manifest.level.as_str())?;
     if let Some(m) = &t.model {

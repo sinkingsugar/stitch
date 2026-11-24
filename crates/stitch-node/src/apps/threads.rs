@@ -2720,7 +2720,7 @@ pub(crate) fn fork_json(f: &crate::chat::ForkPoint) -> Value {
     "summary": f.summary,
     "no_tools": f.no_tools,
     "no_attachments": f.no_attachments,
-    "shared": f.shared.as_ref().map(|o| json!({"from": o.from, "source": o.source, "signed": o.signed})),
+    "shared": f.shared.as_ref().map(|o| json!({"from": o.from, "source": o.source, "signed": o.signed, "own": o.own})),
   })
 }
 

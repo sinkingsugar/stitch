@@ -4701,7 +4701,9 @@ fn fork_point(ctx: &ChatContext<'_>, fork: &RecordId, c: &Continues) -> ForkPoin
   if let Some(o) = &shared {
     said.push_str(&format!(
       " (a conversation shared with you, {})",
-      if o.signed {
+      if o.own {
+        "signed by your own key".to_owned()
+      } else if o.signed {
         format!("signed by key {}…", &o.source[..o.source.len().min(16)])
       } else {
         "unsigned".to_owned()

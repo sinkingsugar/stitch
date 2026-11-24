@@ -86,6 +86,9 @@ pub struct ThreadInfo {
   /// Whether that key signed the file (else it came unsigned).
   #[uniffi(default = false)]
   pub imported_signed: bool,
+  /// Signed by your own key (the importing node's share key).
+  #[uniffi(default = false)]
+  pub imported_own: bool,
 }
 
 /// A room's participant (design §2.27): its `@handle`, how it is shown,
@@ -608,6 +611,8 @@ pub struct ForkInfo {
   pub shared_from: Option<String>,
   pub shared_source: Option<String>,
   pub shared_signed: bool,
+  /// Signed by your own key (the importing node's share key).
+  pub shared_own: bool,
   /// The divider's line.
   pub said: String,
 }
@@ -628,6 +633,7 @@ impl ForkInfo {
       shared_from: f.shared.as_ref().map(|o| o.from.clone()),
       shared_source: f.shared.as_ref().map(|o| o.source.clone()),
       shared_signed: f.shared.as_ref().is_some_and(|o| o.signed),
+      shared_own: f.shared.as_ref().is_some_and(|o| o.own),
       said: f.said.clone(),
     }
   }
@@ -3196,6 +3202,7 @@ impl Stitch {
             imported_from: origin.as_ref().map(|o| o.from.clone()),
             imported_source: origin.as_ref().map(|o| o.source.clone()),
             imported_signed: origin.as_ref().is_some_and(|o| o.signed),
+            imported_own: origin.as_ref().is_some_and(|o| o.own),
             title: index
               .lineage_title(&r.id)
               .unwrap_or_else(|| "(untitled)".into()),

@@ -4181,7 +4181,7 @@ fn run(cli: Cli) -> Result<()> {
         let mut c = client(&cli).await?;
         let p = import_request(&mut c, &bundle, true).await?;
         let signer = match (&p.signer, p.mine) {
-          (Some(_), true) => "signed by this node".to_owned(),
+          (Some(_), true) => "signed by your own key (this node's)".to_owned(),
           (Some(k), false) => format!("signed by key {}", &k[..k.len().min(16)]),
           (None, _) => "unsigned".to_owned(),
         };
