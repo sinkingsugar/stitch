@@ -483,6 +483,12 @@ fn resolved(path: &Path) -> PathBuf {
 /// follows it).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn readable_beside(unreadable: &[PathBuf]) -> Vec<PathBuf> {
+  readable_beside_from(Path::new("/"), unreadable)
+}
+
+/// [`readable_beside`], walking down from `root` (which must hold every
+/// path of `unreadable`) instead of `/`.
+fn readable_beside_from(root: &Path, unreadable: &[PathBuf]) -> Vec<PathBuf> {
   let denied: Vec<PathBuf> = unreadable
     .iter()
     .filter(|p| p.is_absolute())
@@ -493,7 +499,7 @@ pub(crate) fn readable_beside(unreadable: &[PathBuf]) -> Vec<PathBuf> {
   if denied.is_empty() {
     return out;
   }
-  let mut dirs = vec![PathBuf::from("/")];
+  let mut dirs = vec![root.to_path_buf()];
   while let Some(dir) = dirs.pop() {
     let Ok(entries) = std::fs::read_dir(&dir) else {
       continue;
@@ -572,21 +578,26 @@ mod linux_tests {
     std::fs::write(home.join(".config/git/credentials"), "secret").unwrap();
     std::fs::write(home.join(".config/git/ignore"), "*.o").unwrap();
     std::fs::write(home.join(".bashrc"), "").unwrap();
+    std::fs::create_dir(root.join("sibling")).unwrap();
     std::os::unix::fs::symlink(&home, home.join("loop")).unwrap();
     std::os::unix::fs::symlink(home.join("devel"), home.join("work")).unwrap();
-    let r = readable_beside(&[
-      home.join(".ssh"),
-      home.join(".config/gh"),
-      home.join(".config/git/credentials"),
-      home.join(".git-credentials"),
-    ]);
+    // Walk from the temp root: `/` is not readable in a Landlock sandbox.
+    let r = readable_beside_from(
+      &root,
+      &[
+        home.join(".ssh"),
+        home.join(".config/gh"),
+        home.join(".config/git/credentials"),
+        home.join(".git-credentials"),
+      ],
+    );
     for p in [
       home.join("devel"),
       home.join(".bashrc"),
       home.join(".config/other"),
       home.join(".config/git/ignore"),
       home.join("work"),
-      PathBuf::from("/usr"),
+      root.join("sibling"),
     ] {
       assert!(r.contains(&p), "{} in {r:?}", p.display());
     }
@@ -603,7 +614,17 @@ mod linux_tests {
       assert!(!r.contains(&p), "{} in {r:?}", p.display());
     }
     // Nothing unreadable: no rules at all.
-    assert!(readable_beside(&[]).is_empty());
+    assert!(readable_beside_from(&root, &[]).is_empty());
+  }
+
+  #[test]
+  fn from_the_root_what_is_readable_includes_usr() {
+    if std::fs::read_dir("/").is_err() {
+      eprintln!("skipped: `/` is not readable here (a sandboxed shell)");
+      return;
+    }
+    let r = readable_beside(&[PathBuf::from("/nonexistent-stitch-test/x")]);
+    assert!(r.contains(&PathBuf::from("/usr")), "/usr in {r:?}");
   }
 
   /// The GPUs' devices are a sandbox's too (CUDA builds and tests run
