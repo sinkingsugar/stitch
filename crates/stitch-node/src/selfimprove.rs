@@ -1683,6 +1683,28 @@ fn spent_today(s: &Arc<Shared>, now: Timestamp) -> f64 {
 pub(crate) static NODE_STARTED: std::sync::OnceLock<std::time::Instant> =
   std::sync::OnceLock::new();
 
+/// Whether the landed fix `fix` is in the build `running`, judged in the
+/// core's mirror. A fix commit the mirror does not have is no longer in
+/// origin's history (rewritten: a squash, or a new root such as a
+/// repository's publication), so its ancestry cannot be checked; its
+/// content landed on main then, and it counts as contained, or no fixer
+/// would ever start again (no newer fix could be recorded). A mirror
+/// without the running build (none yet, or not fetched) cannot tell: not
+/// contained.
+fn fix_in_build(mirror: &std::path::Path, fix: &str, running: &str) -> bool {
+  let has = |c: &str| {
+    !c.is_empty()
+      && crate::mirror::git(mirror, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_ok()
+  };
+  if !has(running) {
+    return false;
+  }
+  if !has(fix) {
+    return true;
+  }
+  crate::mirror::git(mirror, &["merge-base", "--is-ancestor", fix, running]).is_ok()
+}
+
 /// Why the last landed fix holds the next fixer back: it is not in the
 /// build running here (not installed yet, or rolled back), or this node
 /// has not been up with it for the trial, or a build is on trial.
@@ -1711,13 +1733,7 @@ fn last_fix_pending(
     .to_owned();
   // In the node's mirror (fetched at each admission), never the fixer's
   // checkout.
-  let contained = !running.is_empty()
-    && crate::mirror::git(
-      &crate::mirror::dir(&s.data, &core),
-      &["merge-base", "--is-ancestor", &fix, &running],
-    )
-    .is_ok();
-  if !contained {
+  if !fix_in_build(&crate::mirror::dir(&s.data, &core), &fix, &running) {
     return Some(format!(
       "the last fix ({fix}, issue {}) is not in the build running here ({running}): not \
        installed yet, or rolled back (`stitch node builds`)",
@@ -3544,6 +3560,48 @@ mod tests {
     assert!(!unit_follows_other(
       "<!-- STITCH_FOLLOW: the rollout's branch -->"
     ));
+  }
+
+  #[test]
+  fn a_fix_outside_the_mirrors_history_does_not_hold_fixers_back() {
+    // After a history rewrite (the core's publication from a new root),
+    // the last fix's commit is in no history the mirror has: it counts as
+    // in the build, or no fixer starts again.
+    let root = tempfile::tempdir().unwrap();
+    let work = root.path();
+    let run = |args: &[&str]| {
+      let out = std::process::Command::new("git")
+        .current_dir(work)
+        .args([
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@t",
+          "-c",
+          "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+      assert!(out.status.success(), "git {args:?}");
+      String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    run(&["init", "-q"]);
+    run(&["commit", "-q", "--allow-empty", "-m", "a"]);
+    let old = run(&["rev-parse", "HEAD"]);
+    run(&["commit", "-q", "--allow-empty", "-m", "fix"]);
+    let fix = run(&["rev-parse", "HEAD"]);
+    let mirror = work.join(".git");
+    assert!(fix_in_build(&mirror, &fix, &fix), "installed");
+    assert!(!fix_in_build(&mirror, &fix, &old), "not installed yet");
+    assert!(!fix_in_build(&mirror, &fix, ""), "no build label");
+    let gone = "0123456789abcdef0123456789abcdef01234567";
+    assert!(fix_in_build(&mirror, gone, &fix), "rewritten history");
+    assert!(
+      !fix_in_build(&mirror, &fix, gone),
+      "build not in the mirror"
+    );
+    assert!(!fix_in_build(&work.join("none"), gone, &fix), "no mirror");
   }
 
   #[test]
