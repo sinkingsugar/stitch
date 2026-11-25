@@ -57,6 +57,7 @@ pub const GROUPS: &[(&str, &[&str])] = &[
       "subscribe",
       "event_reply",
       "notify",
+      "call_user",
       "suggest_replies",
       "offer_actions",
       "report_issue",

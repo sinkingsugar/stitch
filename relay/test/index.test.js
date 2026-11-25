@@ -52,6 +52,23 @@ test("a question's notification is named by it; an answer's push shows nothing",
   assert.equal(h["apns-collapse-id"], undefined);
 });
 
+test("a call is a VoIP push to the app's .voip topic, its sealed call alone", async () => {
+  const c = { token, env: "sandbox", e: "QUJD", voip: true };
+  assert.deepEqual(payload(c), { e: "QUJD" });
+  const h = headers(c, "T", "com.fragcolor.stitch", 1_795_000_000_000);
+  assert.equal(h["apns-topic"], "com.fragcolor.stitch.voip");
+  assert.equal(h["apns-push-type"], "voip");
+  assert.equal(h["apns-priority"], "10");
+  assert.equal(h["apns-expiration"], "1795000030");
+  assert.equal(h["apns-collapse-id"], undefined);
+  // Checked as any push, before APNs.
+  const r = await relay.fetch(
+    new Request("https://relay.example/voip", { method: "POST", body: JSON.stringify({ token: "x" }) }),
+    {},
+  );
+  assert.equal(r.status, 400);
+});
+
 test("the APNs token is an ES256 JWT that verifies", async () => {
   const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
     "sign",

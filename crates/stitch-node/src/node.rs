@@ -502,6 +502,9 @@ pub(crate) struct Shared {
   /// Notices for the user (`notify`), and those waiting for this node's
   /// own app.
   pub(crate) notices: crate::notices::Notices,
+  /// Calls this node rang that wait for the phone's word, and their limits
+  /// (`call_user`).
+  pub(crate) rings: std::sync::Arc<crate::rings::Rings>,
   /// The secrets' values this node holds and the variables (design
   /// §2.19): for redaction and for shells' environments.
   pub(crate) vault: Arc<crate::secrets::Vault>,
@@ -3075,6 +3078,7 @@ async fn start_inner(data: &Path, lock: std::fs::File) -> Result<NodeHandle> {
     rooms: Default::default(),
     list_reads: tokio::sync::Semaphore::new(LIST_READS),
     notices: Default::default(),
+    rings: Default::default(),
     vault,
     ssh: Default::default(),
     live: Default::default(),
@@ -5337,6 +5341,10 @@ pub(crate) enum Question {
     set: String,
     item: u32,
   },
+  /// A phone says how a call this node rang went (`call_user`, design
+  /// §2.3, "Calls"): `outcome` `answered`, `declined`, `missed` or
+  /// `failed`. `Reply::Lines`, or `Reply::Error`.
+  Ring { call: String, outcome: String },
 }
 
 /// Answers `peer`'s question with a `Reply`, postcard-encoded.
@@ -5353,6 +5361,7 @@ async fn answer(s: &Arc<Shared>, peer: &str, question: &[u8]) -> Vec<u8> {
     Ok(Question::Press { thread, set, item }) => {
       crate::elsewhere::answer_press(s, &thread, &set, item).await
     }
+    Ok(Question::Ring { call, outcome }) => crate::rings::answer(s, &call, &outcome),
     Ok(Question::Models) => models(s).await,
     Ok(Question::CallTool(call)) => crate::remote::answer(s, peer, call).await,
     Ok(Question::Place(path)) => match crate::weave::resolve_place(s, &path) {
@@ -6509,6 +6518,32 @@ where
           // The nodes that push learn of it now.
           sync_one(s, home.repo()).await;
         }
+        Ok(Reply::Ok)
+      }
+      Request::RegisterVoip { token, env, key } => {
+        let home = s
+          .state()
+          .home()
+          .ok_or_else(|| Error::Config("no home workspace here".into()))?;
+        let new = crate::apns::register_voip(
+          &home,
+          &s.state().index,
+          &s.state().node,
+          &token,
+          &env,
+          &key,
+        )?;
+        if new {
+          sync_one(s, home.repo()).await;
+        }
+        Ok(Reply::Ok)
+      }
+      Request::RingOutcome {
+        node,
+        call,
+        outcome,
+      } => {
+        crate::rings::tell(s, &node, &call, &outcome).await?;
         Ok(Reply::Ok)
       }
       r @ (Request::Apps

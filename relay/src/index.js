@@ -12,6 +12,12 @@
 // POST /answered  {"token", "env", "e"}: a question was answered; a
 //   background push (nothing shown) whose sealed content says which, so
 //   the app takes its notification away. Same answers.
+// POST /voip  {"token": "<PushKit token>", "env", "e"}: a call (an agent's
+//   `call_user`): a VoIP push to `<APNS_TOPIC>.voip`, the sealed call its
+//   whole payload, which the app opens and reports to CallKit as an
+//   incoming call. Kept by APNs only while it could be answered. Same
+//   answers. A node falls back to a notification when a relay from
+//   before calls answers 404.
 //
 // `collapse` becomes the notification's identifier on the phone
 // (`apns-collapse-id`): an opaque record ID, so the app can find it.
@@ -33,13 +39,15 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const answered = url.pathname === "/answered";
-    if (request.method !== "POST" || !(answered || url.pathname === "/push")) {
-      return json({ error: "POST /push or /answered" }, 404);
+    const voip = url.pathname === "/voip";
+    if (request.method !== "POST" || !(answered || voip || url.pathname === "/push")) {
+      return json({ error: "POST /push, /answered or /voip" }, 404);
     }
     let push;
     try {
       push = parsePush(await request.json());
       if (answered) push = { token: push.token, env: push.env, e: push.e, answered: true };
+      if (voip) push = { token: push.token, env: push.env, e: push.e, voip: true };
     } catch (e) {
       return json({ error: String(e.message ?? e) }, 400);
     }
@@ -84,9 +92,23 @@ export function parsePush(body) {
   return push;
 }
 
-/** APNs's headers: an alert (named by `collapse`), or an answer's
- *  background push. */
-export function headers(push, token, topic) {
+/** Seconds APNs keeps a call it cannot deliver now: past them it could
+ *  not be answered anyway. */
+export const RING_EXPIRES = 30;
+
+/** APNs's headers: an alert (named by `collapse`), an answer's
+ *  background push, or a call's VoIP push (its own topic). */
+export function headers(push, token, topic, now = Date.now()) {
+  if (push.voip) {
+    return {
+      authorization: `bearer ${token}`,
+      "apns-topic": `${topic}.voip`,
+      "apns-push-type": "voip",
+      "apns-priority": "10",
+      "apns-expiration": String(Math.floor(now / 1000) + RING_EXPIRES),
+      "content-type": "application/json",
+    };
+  }
   const h = {
     authorization: `bearer ${token}`,
     "apns-topic": topic,
@@ -102,6 +124,8 @@ export function headers(push, token, topic) {
  *  phone's extension (`mutable-content`), the badge; for an answer, only
  *  the ciphertext, for the app woken in the background. */
 export function payload(push) {
+  // PushKit hands the payload to the app as it is: nothing is shown.
+  if (push.voip) return { e: push.e };
   if (push.answered) return { aps: { "content-available": 1 }, e: push.e };
   const aps = {
     alert: PLACEHOLDER,

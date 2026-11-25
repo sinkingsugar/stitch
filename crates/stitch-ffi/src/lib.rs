@@ -2708,6 +2708,37 @@ impl Stitch {
     }
   }
 
+  /// This device's PushKit token (VoIP pushes, for calls: design §2.3,
+  /// "Calls"), with `env` and `key` as `register_push` takes them:
+  /// recorded beside the push token, so the user's nodes can ring it.
+  pub async fn register_voip(&self, token: String, env: String, key: String) -> Result<()> {
+    match self
+      .request(Request::RegisterVoip { token, env, key })
+      .await?
+    {
+      Reply::Ok => Ok(()),
+      other => Err(StitchError::of(format!("unexpected reply: {other:?}"))),
+    }
+  }
+
+  /// Tells `node` how the call it rang went (`call`, its ID, from the VoIP
+  /// push): `answered`, `declined`, `missed` or `failed`. Tried a few
+  /// times; an error when it could not be told.
+  pub async fn ring_outcome(&self, node: String, call: String, outcome: String) -> Result<()> {
+    match self
+      .request(Request::RingOutcome {
+        node,
+        call,
+        outcome,
+      })
+      .await?
+    {
+      Reply::Ok => Ok(()),
+      Reply::Error(e) => Err(StitchError::of(e)),
+      other => Err(StitchError::of(format!("unexpected reply: {other:?}"))),
+    }
+  }
+
   /// What an app's origin answers (design §2.10): the web view's URL
   /// scheme handler (`stitch-app://<host><path>`) asks with each request.
   /// Never fails: an error is a response too.

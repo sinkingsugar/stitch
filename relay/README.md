@@ -47,3 +47,12 @@ npm test                              # the relay: checks, payload, its APNs tok
 `POST /push` with `{"token": "<hex>", "env": "sandbox" | "production", "e":
 "<base64 sealed content>", "badge": 3}`: 200 `{"ok": true}`; 400 for a push it
 does not take, 429 past the cap, 502 with APNs's reason.
+
+`POST /answered` with `{"token", "env", "e"}`: a background push (nothing
+shown) saying a question was answered. `POST /voip` with `{"token": "<the
+PushKit token>", "env", "e"}`: a call (`call_user`), a VoIP push to
+`<APNS_TOPIC>.voip` whose whole payload is the sealed call (`{"e": …}`),
+kept by APNs 30 seconds at most; the app reports it to CallKit as an
+incoming call. A relay from before calls answers it 404, and the node sends
+a notification instead. The same key pushes to both topics (a team-scoped
+APNs key; one restricted to the app's own topic is refused for `.voip`).

@@ -568,6 +568,15 @@ impl NodeTools {
           crate::weave::outcome(crate::notices::tool(&s, &thread, input).await)
         })
       }
+      "call_user" => {
+        let (shared, thread, input) = (self.shared.upgrade(), thread.clone(), input.clone());
+        Box::pin(async move {
+          let Some(s) = shared else {
+            return ToolOutcome::err("the node is stopping");
+          };
+          crate::weave::outcome(crate::rings::tool(&s, &thread, input).await)
+        })
+      }
       "report_issue" | "self_improve" => {
         let (shared, thread, input) = (self.shared.upgrade(), thread.clone(), input.clone());
         let asker = self.shell.asker();
@@ -834,6 +843,7 @@ impl ToolRunner for NodeTools {
       out.extend(crate::schedules::definitions());
       out.extend(crate::events::definitions());
       out.push(crate::notices::definition());
+      out.push(crate::rings::definition());
       out.push(crate::replies::definition());
       out.push(crate::actions::definition());
       out.push(crate::issues::definition());

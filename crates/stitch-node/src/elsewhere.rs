@@ -243,6 +243,28 @@ pub(crate) async fn press(
   }
 }
 
+/// Tells peer `node` how a call it rang went (`Question::Ring`).
+pub(crate) async fn ring_outcome(
+  s: &Arc<Shared>,
+  node: &str,
+  call: &str,
+  outcome: &str,
+) -> Result<()> {
+  let q = Question::Ring {
+    call: call.to_owned(),
+    outcome: outcome.to_owned(),
+  };
+  match ask(s, node, &q).await {
+    Ok(Reply::Error(e)) => Err(Error::Config(e)),
+    Ok(_) => Ok(()),
+    Err(Unasked::Unreachable) => Err(Error::Config(format!("{node} is not reachable now"))),
+    Err(Unasked::Unknown) => Err(Error::Config(format!(
+      "{node}'s Stitch is too old to hear of calls"
+    ))),
+    Err(Unasked::Failed(e)) => Err(Error::Config(format!("{node}: {e}"))),
+  }
+}
+
 /// A peer's `Question::Press`, run here.
 pub(crate) async fn answer_press(s: &Arc<Shared>, thread: &str, set: &str, item: u32) -> Reply {
   let run = async {

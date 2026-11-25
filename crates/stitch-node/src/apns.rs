@@ -16,6 +16,13 @@
 //! `relay/`; `stitch apns relay <url>` names another). Either takes the
 //! same sealed content.
 //!
+//! Calls (`crate::rings`, an agent's `call_user`) ring the phone with a
+//! VoIP push (PushKit), which the app turns into a real incoming call
+//! (CallKit): the phone registers a second token for them, its PushKit
+//! token, as `voip` in the same `device` record; the push goes to the
+//! topic `<app>.voip` with type `voip`, its whole payload sealed (no
+//! placeholder: PushKit shows nothing by itself).
+//!
 //! Sealing: an ephemeral X25519 key, its agreement with the phone's,
 //! HKDF-SHA256 (salt: both public keys; info: `stitch push v1`) to a
 //! ChaCha20-Poly1305 key; the wire is the ephemeral public key, the nonce
@@ -58,12 +65,17 @@ const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STA
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Device {
   pub node: String,
-  pub token: String,
+  /// Its APNs device token, for notifications (`None`: it registered
+  /// only for calls).
+  pub token: Option<String>,
   /// `sandbox` (a development build) or `production`.
   pub env: String,
   /// The public half of its X25519 key, base64: what pushes are sealed
   /// for.
   pub key: Option<String>,
+  /// Its PushKit token, for calls (`ring`): a VoIP push rings it with a
+  /// real incoming call. `None`: an app from before calls.
+  pub voip: Option<String>,
 }
 
 /// The phones, as their latest `device` records say: one per node.
@@ -71,7 +83,10 @@ pub fn devices(index: &Index) -> Vec<Device> {
   let mut out: Vec<Device> = Vec::new();
   for r in index.records(Some(DEVICE)).unwrap_or_default() {
     let s = |k: &str| r.fields.get(k).and_then(Value::as_str).map(str::to_owned);
-    let Some(token) = s("token") else { continue };
+    let (token, voip) = (s("token"), s("voip"));
+    if token.is_none() && voip.is_none() {
+      continue;
+    }
     // Oldest first: a later record of a node replaces its earlier.
     out.retain(|d| d.node != r.node);
     out.push(Device {
@@ -79,13 +94,24 @@ pub fn devices(index: &Index) -> Vec<Device> {
       token,
       env: s("env").unwrap_or_else(|| "production".into()),
       key: s("key"),
+      voip,
     });
   }
   out
 }
 
+/// A token as APNs gives it: hex digits, lowercased.
+fn hex_token(token: &str) -> Result<String> {
+  let token = token.trim().to_ascii_lowercase();
+  if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) {
+    return Err(Error::Config("a device token is hex digits".into()));
+  }
+  Ok(token)
+}
+
 /// Writes this phone's registration, unless its latest record already
-/// says it; whether it wrote one.
+/// says it; whether it wrote one. Its PushKit token (`register_voip`) is
+/// kept.
 pub fn register(
   home: &RecordRoot,
   index: &Mutex<Index>,
@@ -94,10 +120,44 @@ pub fn register(
   env: &str,
   key: &str,
 ) -> Result<bool> {
-  let token = token.trim().to_ascii_lowercase();
-  if token.is_empty() || !token.chars().all(|c| c.is_ascii_hexdigit()) {
-    return Err(Error::Config("a device token is hex digits".into()));
-  }
+  let token = hex_token(token)?;
+  let voip = latest(index, node).and_then(|d| d.voip);
+  write(home, index, node, Some(token), env, key, voip)
+}
+
+/// Writes this phone's PushKit token (the app's `PKPushRegistry`, for
+/// calls) beside its APNs token, unless its latest record already says
+/// it; whether it wrote one. `env` and `key` as for `register`: a VoIP
+/// push is sealed as a notification is.
+pub fn register_voip(
+  home: &RecordRoot,
+  index: &Mutex<Index>,
+  node: &NodeName,
+  voip: &str,
+  env: &str,
+  key: &str,
+) -> Result<bool> {
+  let voip = hex_token(voip)?;
+  let token = latest(index, node).and_then(|d| d.token);
+  write(home, index, node, token, env, key, Some(voip))
+}
+
+/// This node's latest registration.
+fn latest(index: &Mutex<Index>, node: &NodeName) -> Option<Device> {
+  devices(&index.lock().expect("index lock"))
+    .into_iter()
+    .find(|d| d.node == node.as_str())
+}
+
+fn write(
+  home: &RecordRoot,
+  index: &Mutex<Index>,
+  node: &NodeName,
+  token: Option<String>,
+  env: &str,
+  key: &str,
+  voip: Option<String>,
+) -> Result<bool> {
   if env != "sandbox" && env != "production" {
     return Err(Error::Config(
       "an APNs environment is sandbox or production".into(),
@@ -108,18 +168,24 @@ pub fn register(
       "a push key is an X25519 public key, base64".into(),
     ));
   }
-  {
-    let index = index.lock().expect("index lock");
-    if devices(&index).iter().any(|d| {
-      d.node == node.as_str() && d.token == token && d.env == env && d.key.as_deref() == Some(key)
-    }) {
-      return Ok(false);
-    }
+  let device = Device {
+    node: node.to_string(),
+    token,
+    env: env.to_owned(),
+    key: Some(key.to_owned()),
+    voip,
+  };
+  if latest(index, node).as_ref() == Some(&device) {
+    return Ok(false);
   }
-  let draft = Draft::new(DEVICE, Author::node(node.clone()))?
-    .field("token", token.as_str())?
-    .field("env", env)?
-    .field("key", key)?;
+  let mut draft = Draft::new(DEVICE, Author::node(node.clone()))?;
+  if let Some(t) = &device.token {
+    draft = draft.field("token", t.as_str())?;
+  }
+  draft = draft.field("env", env)?.field("key", key)?;
+  if let Some(v) = &device.voip {
+    draft = draft.field("voip", v.as_str())?;
+  }
   home.publish(node, draft)?;
   index.lock().expect("index lock").refresh(home)?;
   Ok(true)
@@ -180,8 +246,15 @@ pub(crate) fn seal_with(info: &[u8], key: &str, content: &[u8]) -> Result<String
   Ok(B64.encode([ours.as_ref(), &nonce, &sealed].concat()))
 }
 
+/// Opens what `seal` sealed for the key whose private half is `private`,
+/// as the phone does (`None` when it does not open): for tests and tools
+/// that stand in for a phone.
+pub fn open(private: &[u8; 32], wire: &str) -> Option<Vec<u8>> {
+  open_with(INFO, private, wire)
+}
+
 /// The X25519 public key of a private one.
-pub(crate) fn public_of(private: &[u8; 32]) -> [u8; 32] {
+pub fn public_of(private: &[u8; 32]) -> [u8; 32] {
   x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*private)).to_bytes()
 }
 
@@ -315,7 +388,8 @@ impl Push<'_> {
 
   /// What the relay takes (`/push`, or `/answered` for an answer's).
   fn relay_body(&self, d: &Device, sealed: &str) -> Value {
-    let mut body = json!({"token": d.token, "env": d.env, "e": sealed});
+    let mut body =
+      json!({"token": d.token.as_deref().unwrap_or_default(), "env": d.env, "e": sealed});
     if self.answered {
       return body;
     }
@@ -410,6 +484,13 @@ impl Pusher {
         ));
         continue;
       };
+      let Some(device_token) = &d.token else {
+        out.push(format!(
+          "{}: registered for calls only (notifications not allowed): not pushed",
+          d.node
+        ));
+        continue;
+      };
       let sealed = match seal(key, content.as_bytes()) {
         Ok(s) => s,
         Err(e) => {
@@ -434,7 +515,7 @@ impl Pusher {
             "api.push.apple.com"
           };
           let mut req = client
-            .post(format!("https://{host}/3/device/{}", d.token))
+            .post(format!("https://{host}/3/device/{device_token}"))
             .bearer_auth(&token)
             .header("apns-topic", topic.as_str());
           req = if push.answered {
@@ -464,24 +545,152 @@ impl Pusher {
             .await
         }
       };
-      out.push(match sent {
-        Ok(r) if r.status().is_success() => format!("{}: pushed", d.node),
-        Ok(r) => {
-          let status = r.status();
-          let v = r.json::<Value>().await.unwrap_or(Value::Null);
-          let why = v
-            .get("reason")
-            .or_else(|| v.get("error"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-          format!("{}: {status} {why}", d.node).trim_end().to_owned()
-        }
-        Err(e) => format!("{}: {e}", d.node),
-      });
+      out.push(said(&d.node, sent, "pushed").await);
     }
     out
   }
+
+  /// Rings each phone that registered for calls (`crate::rings`): a VoIP
+  /// push (PushKit), sealed as a notification is, which the app reports
+  /// to CallKit as an incoming call. A line for each, `<node>: ringing`
+  /// when APNs (or the relay) took it; phones without a PushKit token are
+  /// left out.
+  pub(crate) async fn ring(
+    &self,
+    data: &Path,
+    settings: &ApnsSettings,
+    devices: &[Device],
+    ring: &Ring<'_>,
+  ) -> Vec<String> {
+    let route = match Self::route(data, settings) {
+      Ok(r) => r,
+      Err(e) => return vec![e.to_string()],
+    };
+    let content = ring.content();
+    let client = crate::github::http();
+    let mut out = Vec::new();
+    for d in devices {
+      let (Some(key), Some(voip)) = (&d.key, &d.voip) else {
+        continue;
+      };
+      let sealed = match seal(key, content.as_bytes()) {
+        Ok(s) => s,
+        Err(e) => {
+          out.push(format!("{}: {e}", d.node));
+          continue;
+        }
+      };
+      let sent = match &route {
+        Route::Direct {
+          pem,
+          key_id,
+          team_id,
+          topic,
+        } => {
+          let token = match self.token(pem, key_id, team_id) {
+            Ok(t) => t,
+            Err(e) => return vec![e.to_string()],
+          };
+          let host = if d.env == "sandbox" {
+            "api.sandbox.push.apple.com"
+          } else {
+            "api.push.apple.com"
+          };
+          client
+            .post(format!("https://{host}/3/device/{voip}"))
+            .bearer_auth(&token)
+            .header("apns-topic", format!("{topic}.voip"))
+            .header("apns-push-type", "voip")
+            .header("apns-priority", "10")
+            // A call that cannot ring now must not ring later: APNs keeps
+            // it only while it could still be answered.
+            .header("apns-expiration", (ring.at + RING_EXPIRES).to_string())
+            .json(&ring_payload(&sealed))
+            .send()
+            .await
+        }
+        // A relay from before calls answers 404: the caller falls back to
+        // a notification.
+        Route::Relay(url) => {
+          client
+            .post(format!("{url}/voip"))
+            .json(&json!({"token": voip, "env": d.env, "e": sealed}))
+            .send()
+            .await
+        }
+      };
+      out.push(said(&d.node, sent, "ringing").await);
+    }
+    out
+  }
+}
+
+/// A line for what APNs or the relay said of a push to `node`'s phone.
+async fn said(
+  node: &str,
+  sent: std::result::Result<reqwest::Response, reqwest::Error>,
+  ok: &str,
+) -> String {
+  match sent {
+    Ok(r) if r.status().is_success() => format!("{node}: {ok}"),
+    Ok(r) => {
+      let status = r.status();
+      let v = r.json::<Value>().await.unwrap_or(Value::Null);
+      let why = v
+        .get("reason")
+        .or_else(|| v.get("error"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+      format!("{node}: {status} {why}").trim_end().to_owned()
+    }
+    Err(e) => format!("{node}: {e}"),
+  }
+}
+
+/// Seconds a call's VoIP push is kept by APNs for a phone it cannot reach
+/// now: past them the call could not be answered anyway.
+pub const RING_EXPIRES: i64 = 30;
+
+/// A call, as a VoIP push carries it to the phone, sealed (`crate::rings`).
+pub struct Ring<'a> {
+  /// The call's ID (a UUID: CallKit's), which its outcome names.
+  pub call: &'a str,
+  /// The thread that calls: answering opens a voice call with it.
+  pub thread: Option<&'a str>,
+  /// The node that calls (the phone tells it how the call went, and syncs
+  /// the thread from it).
+  pub node: &'a str,
+  /// The caller line the phone shows ("Stitch: the build on beast is
+  /// stuck").
+  pub caller: &'a str,
+  /// The thread's title.
+  pub title: Option<&'a str>,
+  /// When it was made (Unix seconds): the phone does not ring for a stale
+  /// one (a push replayed, or held too long).
+  pub at: i64,
+}
+
+impl Ring<'_> {
+  /// What is sealed for the phone.
+  fn content(&self) -> String {
+    json!({
+      "ring": self.call,
+      "thread": self.thread,
+      "node": self.node,
+      "caller": self.caller,
+      "title": self.title,
+      "at": self.at,
+    })
+    .to_string()
+  }
+}
+
+/// What a VoIP push carries: the sealed call alone. PushKit hands the
+/// payload to the app as it is (nothing is shown), so there is no `aps`
+/// and no placeholder; the app opens it and reports the call to CallKit.
+fn ring_payload(sealed: &str) -> Value {
+  json!({"e": sealed})
 }
 
 #[cfg(test)]
@@ -557,9 +766,10 @@ mod tests {
   fn a_question_and_its_answer_push_differently() {
     let phone = Device {
       node: "iphone".into(),
-      token: "ab".repeat(32),
+      token: Some("ab".repeat(32)),
       env: "sandbox".into(),
       key: None,
+      voip: None,
     };
     let mut push = Push {
       title: "Approve on mbp?",
@@ -614,9 +824,10 @@ mod tests {
     // Not a question's: no collapse, so notices do not replace each other.
     let phone = Device {
       node: "iphone".into(),
-      token: "ab".repeat(32),
+      token: Some("ab".repeat(32)),
       env: "sandbox".into(),
       key: None,
+      voip: None,
     };
     assert!(push.relay_body(&phone, "SEALED").get("collapse").is_none());
   }
@@ -628,6 +839,64 @@ mod tests {
     if let Ok(key) = std::env::var("STITCH_PUSH_INTEROP_KEY") {
       println!("SEALED {}", seal(&key, b"{\"body\":\"interop\"}").unwrap());
     }
+  }
+
+  /// Rings a real phone, for trying calls on a device: with
+  /// `STITCH_RING_TOKEN` (its PushKit token, hex), `STITCH_RING_KEY` (its
+  /// push key, base64), `STITCH_RING_P8` (an APNs key file),
+  /// `STITCH_RING_KEY_ID`, `STITCH_RING_TEAM`, and optionally
+  /// `STITCH_RING_ENV` (sandbox), `STITCH_RING_NODE` (the node said to
+  /// call), `STITCH_RING_THREAD`, `STITCH_RING_REASON`. Nothing without
+  /// them.
+  #[test]
+  fn ring_a_real_phone() {
+    let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let (Some(voip), Some(key), Some(p8), Some(key_id), Some(team)) = (
+      var("STITCH_RING_TOKEN"),
+      var("STITCH_RING_KEY"),
+      var("STITCH_RING_P8"),
+      var("STITCH_RING_KEY_ID"),
+      var("STITCH_RING_TEAM"),
+    ) else {
+      return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let pem = std::fs::read_to_string(p8).unwrap();
+    crate::keys::set(dir.path(), KEY, &pem, crate::keys::Store::File).unwrap();
+    let settings = ApnsSettings {
+      key_id: Some(key_id),
+      team_id: Some(team),
+      ..Default::default()
+    };
+    let phone = Device {
+      node: "phone".into(),
+      token: None,
+      env: var("STITCH_RING_ENV").unwrap_or_else(|| "sandbox".into()),
+      key: Some(key),
+      voip: Some(voip),
+    };
+    let node = var("STITCH_RING_NODE").unwrap_or_else(|| "mbp".into());
+    let thread = var("STITCH_RING_THREAD");
+    let reason = var("STITCH_RING_REASON").unwrap_or_else(|| "Stitch: a test call".into());
+    let call =
+      var("STITCH_RING_CALL").unwrap_or_else(|| "6f1c2a8e-0b7d-4c3e-9a51-2d4f8e7b6a90".into());
+    let lines = tokio::runtime::Runtime::new()
+      .unwrap()
+      .block_on(Pusher::default().ring(
+        dir.path(),
+        &settings,
+        &[phone],
+        &Ring {
+          call: &call,
+          thread: thread.as_deref(),
+          node: &node,
+          caller: &reason,
+          title: None,
+          at: jiff::Timestamp::now().as_second(),
+        },
+      ));
+    println!("RING {call}: {lines:?}");
+    assert!(lines.iter().all(|l| l.ends_with(": ringing")), "{lines:?}");
   }
 
   #[test]
@@ -663,10 +932,63 @@ mod tests {
       devices(&index.lock().unwrap()),
       [Device {
         node: "iphone".into(),
-        token: "abcdef02".into(),
+        token: Some("abcdef02".into()),
         env: "sandbox".into(),
-        key: Some(key),
+        key: Some(key.clone()),
+        voip: None,
       }]
     );
+    // Calls: the PushKit token joins the APNs token, and each keeps the
+    // other.
+    apart();
+    assert!(register_voip(&home, &index, &phone, "CAFE01", "sandbox", &key).unwrap());
+    apart();
+    assert!(!register_voip(&home, &index, &phone, "cafe01", "sandbox", &key).unwrap());
+    apart();
+    assert!(register(&home, &index, &phone, "abcdef03", "sandbox", &key).unwrap());
+    assert!(register_voip(&home, &index, &phone, "xyz", "sandbox", &key).is_err());
+    let d = &devices(&index.lock().unwrap())[0];
+    assert_eq!(d.token.as_deref(), Some("abcdef03"));
+    assert_eq!(d.voip.as_deref(), Some("cafe01"));
+  }
+
+  #[test]
+  fn a_phone_may_register_for_calls_alone() {
+    // Notifications not allowed: no APNs token, but calls ring all the same.
+    let dir = tempfile::tempdir().unwrap();
+    let home = RecordRoot::init(
+      dir.path(),
+      "home".parse().unwrap(),
+      stitch_store::Role::Home,
+    )
+    .unwrap();
+    let index = Mutex::new(Index::open(&dir.path().join("index.sqlite")).unwrap());
+    let phone: NodeName = "iphone".parse().unwrap();
+    let key = B64.encode([1u8; 32]);
+    assert!(register_voip(&home, &index, &phone, "beef", "production", &key).unwrap());
+    let d = &devices(&index.lock().unwrap())[0];
+    assert_eq!(
+      (d.token.as_deref(), d.voip.as_deref()),
+      (None, Some("beef"))
+    );
+  }
+
+  #[test]
+  fn a_ring_is_sealed_whole_and_carries_nothing_in_the_clear() {
+    let ring = Ring {
+      call: "6f1c2a8e-0b7d-4c3e-9a51-2d4f8e7b6a90",
+      thread: Some("2026-11-25T183933Z-beast-2d4j"),
+      node: "beast",
+      caller: "Stitch: the build on beast is stuck",
+      title: Some("Nightly build"),
+      at: 1_795_000_000,
+    };
+    let c: Value = serde_json::from_str(&ring.content()).unwrap();
+    assert_eq!(c["ring"], "6f1c2a8e-0b7d-4c3e-9a51-2d4f8e7b6a90");
+    assert_eq!(c["thread"], "2026-11-25T183933Z-beast-2d4j");
+    assert_eq!(c["node"], "beast");
+    assert_eq!(c["caller"], "Stitch: the build on beast is stuck");
+    assert_eq!(c["at"], 1_795_000_000);
+    assert_eq!(ring_payload("SEALED"), json!({"e": "SEALED"}));
   }
 }

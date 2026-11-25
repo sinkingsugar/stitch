@@ -161,6 +161,23 @@ pub enum Request {
     /// sealed for it.
     key: String,
   },
+  /// A phone's registration for calls (design §2.3, "Calls"): its PushKit
+  /// token (VoIP pushes ring it through CallKit), with `env` and `key` as
+  /// `RegisterDevice` has them; kept in the same `device` record.
+  RegisterVoip {
+    token: String,
+    env: String,
+    key: String,
+  },
+  /// The phone says how a call went (`call_user`): `call` its ID, rung by
+  /// `node`, `outcome` `answered`, `declined`, `missed` or `failed`;
+  /// passed on to that node. `Reply::Ok`, or `Reply::Error` when it could
+  /// not be told.
+  RingOutcome {
+    node: String,
+    call: String,
+    outcome: String,
+  },
   /// Sends a test push to the user's phones; a line per phone.
   ApnsTest,
   /// A notice to the user's phones (`stitch notify`), from a thread
@@ -1759,6 +1776,16 @@ mod wire_tests {
         token: s("t"),
         env: s("sandbox"),
         key: s("k"),
+      },
+      RegisterVoip {
+        token: s("t"),
+        env: s("sandbox"),
+        key: s("k"),
+      },
+      RingOutcome {
+        node: s("mac"),
+        call: s("c"),
+        outcome: s("answered"),
       },
       ApnsTest,
       Notify {
