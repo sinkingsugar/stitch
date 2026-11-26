@@ -53,6 +53,37 @@ pub(crate) const DEFAULT_MODEL: &str = "gemini/gemini-decision-1";
 pub(crate) const THRESHOLD: f64 = 0.7;
 /// The longest a check waits for the model.
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(3);
+/// Waits before the retries of a transient failure of the decision model
+/// (issue 2026-11-26T081631Z-mbp-xtvh): four attempts in all.
+const RETRY: [Duration; 3] = [
+  Duration::from_secs(1),
+  Duration::from_secs(3),
+  Duration::from_secs(8),
+];
+
+/// Whether a failure of the decision model (its message) is worth another
+/// try: a timeout, a connection error, or an API status the providers
+/// retry (408, 409, 429, 5xx, as `stitch_providers::Error::retryable`).
+/// The message is `provider: 503 STATUS: text`, `http: ...` or `timed out`,
+/// possibly `first; the fallback: second` (the first decides).
+fn transient(e: &str) -> bool {
+  let e = e.trim();
+  if e == "timed out" || e.starts_with("timed out") {
+    return true;
+  }
+  if let Some(h) = e.strip_prefix("http: ") {
+    return h.contains("connect") || h.contains("timed out") || h.contains("error sending request");
+  }
+  e.split_whitespace()
+    .take(3)
+    .map(|t| t.trim_matches(':'))
+    .any(|t| {
+      t.len() == 3
+        && t
+          .parse::<u16>()
+          .is_ok_and(|c| c == 408 || c == 409 || c == 429 || (500..600).contains(&c))
+    })
+}
 /// The files attached, in bytes at most.
 pub(crate) const CAP: usize = 60_000;
 /// After the model failed, it is not asked again for this long (the role's
@@ -708,6 +739,8 @@ pub(crate) struct Guard {
   shared_cooling: bool,
   own_cooling: Mutex<Option<Instant>>,
   cool_down: Duration,
+  /// Waits before each retry of a transient failure of the model.
+  retry: Vec<Duration>,
 }
 
 impl Guard {
@@ -731,6 +764,7 @@ impl Guard {
       shared_cooling: true,
       own_cooling: Mutex::new(None),
       cool_down: COOL_DOWN,
+      retry: RETRY.to_vec(),
     }
   }
 
@@ -885,11 +919,18 @@ impl Guard {
     }
     let started = Instant::now();
     let asked = questions(self.role);
-    let answer = tokio::time::timeout(TIMEOUT + Duration::from_millis(500), async {
-      self.decider.decide(input, asked).await
-    })
-    .await
-    .unwrap_or_else(|_| Err("timed out".to_owned()));
+    let mut waits = self.retry.iter();
+    let answer = loop {
+      let answer = tokio::time::timeout(TIMEOUT + Duration::from_millis(500), async {
+        self.decider.decide(input.clone(), asked.clone()).await
+      })
+      .await
+      .unwrap_or_else(|_| Err("timed out".to_owned()));
+      match (&answer, waits.next()) {
+        (Err(e), Some(wait)) if transient(e) => tokio::time::sleep(*wait).await,
+        _ => break answer,
+      }
+    };
     v.ms = started.elapsed().as_millis() as u64;
     match answer {
       Ok(s) => {
@@ -1183,6 +1224,7 @@ pub(crate) mod tests {
       Arc::new(|| "Clean the build caches".into()),
     );
     g.shared_cooling = false;
+    g.retry = vec![Duration::from_millis(1); 3];
     g.home = Some(PathBuf::from("/home/u"));
     (Arc::new(g), fake)
   }
@@ -1210,6 +1252,7 @@ pub(crate) mod tests {
       false,
     ));
     g.shared_cooling = false;
+    g.retry = vec![Duration::from_millis(1); 3];
     g.home = Some(PathBuf::from("/home/u"));
     (Arc::new(g), fake)
   }
@@ -1320,13 +1363,106 @@ pub(crate) mod tests {
   }
 
   #[tokio::test]
+  async fn transient_failures_are_retried_until_it_answers() {
+    let n = std::sync::atomic::AtomicUsize::new(0);
+    let (g, fake) = guard(Mode::On, move |_| {
+      if n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+        Err("gemini: 503 UNAVAILABLE: The model is overloaded".into())
+      } else {
+        Ok(0.1)
+      }
+    });
+    let v = g
+      .check(shell("cargo build", Path::new("/x")))
+      .await
+      .unwrap();
+    assert!(
+      v.score.is_some() && v.error.is_none() && !v.unavailable(),
+      "{v:?}"
+    );
+    assert_eq!(fake.inputs.lock().unwrap().len(), 3);
+    assert!(!g.cooled());
+  }
+
+  #[tokio::test]
+  async fn a_flagged_verdict_is_not_retried() {
+    let (g, fake) = guard(Mode::On, |_| Ok(0.95));
+    let v = g
+      .check(shell("rm -rf build", Path::new("/x")))
+      .await
+      .unwrap();
+    assert!(v.asks() && v.error.is_none(), "{v:?}");
+    assert_eq!(fake.inputs.lock().unwrap().len(), 1);
+  }
+
+  #[tokio::test]
+  async fn a_cancelled_check_stops_retrying() {
+    let (g, fake) = guard(Mode::On, |_| Err("gemini: 503 UNAVAILABLE: x".into()));
+    let mut g = Arc::try_unwrap(g).ok().unwrap();
+    g.retry = vec![Duration::from_secs(10); 3];
+    let r = tokio::time::timeout(
+      Duration::from_millis(50),
+      g.check(shell("cargo build", Path::new("/x"))),
+    )
+    .await;
+    assert!(r.is_err(), "the check was still retrying");
+    assert_eq!(fake.inputs.lock().unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+      fake.inputs.lock().unwrap().len(),
+      1,
+      "no call after the drop"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_permanent_failure_is_not_retried() {
+    let (g, fake) = guard(Mode::On, |_| {
+      Err("gemini: 403 PERMISSION_DENIED: no".into())
+    });
+    let v = g
+      .check(shell("cargo build", Path::new("/x")))
+      .await
+      .unwrap();
+    assert!(v.unavailable() && v.fails());
+    assert_eq!(fake.inputs.lock().unwrap().len(), 1);
+    assert!(g.cooled());
+  }
+
+  #[test]
+  fn transient_tells_the_failures_worth_retrying() {
+    for e in [
+      "gemini: 503 UNAVAILABLE: overloaded",
+      "gemini: 429 RESOURCE_EXHAUSTED: slow down",
+      "gemini: 408 : t",
+      "503",
+      "timed out",
+      "http: error sending request for url (https://x): client error (Connect)",
+      "gemini: 500 INTERNAL: x; the fallback: gemini: 400 INVALID: y",
+    ] {
+      assert!(transient(e), "{e}");
+    }
+    for e in [
+      "gemini: 400 INVALID_ARGUMENT: 500 chars",
+      "gemini: 401 UNAUTHENTICATED: x",
+      "no key for gemini",
+      "no answer to `k`",
+      "the thread's budget would be passed",
+      "the decision service is stopping",
+      "http: error decoding response body",
+    ] {
+      assert!(!transient(e), "{e}");
+    }
+  }
+
+  #[tokio::test]
   async fn a_failing_model_is_unavailable_and_cools_down() {
     let (g, fake) = guard(Mode::On, |_| Err("503".into()));
     let v = g
       .check(shell("cargo build", Path::new("/x")))
       .await
       .unwrap();
-    assert!(v.unavailable() && !v.asks() && v.fails());
+    assert!(v.unavailable() && !v.asks() && v.fails() && v.score.is_none());
     assert_eq!(v.error.as_deref(), Some("503"));
     let e = unavailable(&v);
     assert!(
@@ -1337,8 +1473,8 @@ pub(crate) mod tests {
     assert!(v.unavailable() && v.fails());
     assert_eq!(
       fake.inputs.lock().unwrap().len(),
-      1,
-      "not asked while cooling"
+      4,
+      "the four attempts of the first check, none while cooling"
     );
     // A reading line still runs: it needs no verdict.
     let v = g.check(shell("cat README", Path::new("/x"))).await.unwrap();
@@ -1352,8 +1488,8 @@ pub(crate) mod tests {
       .unwrap();
     assert_eq!(
       fake.inputs.lock().unwrap().len(),
-      2,
-      "asked after the cool-down"
+      8,
+      "asked (four attempts) after the cool-down"
     );
   }
 
@@ -1387,6 +1523,7 @@ pub(crate) mod tests {
       Arc::new(String::new),
     );
     g.shared_cooling = false;
+    g.retry = vec![Duration::from_millis(1); 3];
     let v = g
       .check(shell("psql -c 'drop table x'", Path::new("/x")))
       .await
