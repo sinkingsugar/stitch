@@ -176,14 +176,7 @@ export function init(a: Api) {
       }
       await readApps();
     },
-    unpin: async (app) => {
-      try {
-        await a.call({ AppUnpin: { app } });
-      } catch (e) {
-        error.value = `unpin: ${e instanceof Error ? e.message : e}`;
-      }
-      await readApps();
-    },
+    unpin: unpinApp,
   });
   // Deltas pushed (the node's `watch`): the list comes whole on connecting,
   // then the rows that moved; the live sections as they move; the running
@@ -313,6 +306,16 @@ export function setAppsOpen(open: boolean) {
   appsOpen.value = open;
   localStorage.setItem(APPS_KEY, open ? "1" : "0");
   if (open) void readApps();
+}
+/** Remove the pin by ID, without needing its thread or app version. */
+export async function unpinApp(app: string) {
+  try {
+    await rpc({ AppUnpin: { app } });
+    apps.value = apps.peek().filter((p) => p.id !== app);
+  } catch (e) {
+    error.value = `unpin: ${e instanceof Error ? e.message : e}`;
+  }
+  await readApps();
 }
 /** Opens a pinned app in a tab of its own, at the node's address with its token. */
 export async function openApp(a: AppInfo) {

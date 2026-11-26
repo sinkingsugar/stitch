@@ -167,7 +167,7 @@ export function RichComposer({ onSend, placeholder, thread, room }: { onSend: (t
       <input ref={pick} type="file" multiple hidden onChange={(e) => { void add([...(e.currentTarget.files ?? [])]); e.currentTarget.value = ""; }} />
       <button title="Attach files" onClick={() => pick.current?.click()}>📎</button>
       <ScopePicker scopes={scopes} onToggle={(s) => setScopes((l) => toggleScope(l, s))} />
-      {room ? <RoomTarget text={text} room={room} /> : <ModelChip thread={thread} />}
+      {room ? <RoomTarget text={text} room={room} /> : <ModelChip key={thread ?? "new"} thread={thread} />}
       <button class="primary" disabled={busy > 0} onClick={go}>Send</button>
     </div>
   );

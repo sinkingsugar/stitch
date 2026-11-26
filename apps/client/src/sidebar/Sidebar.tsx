@@ -3,7 +3,7 @@ import * as S from "../store";
 import * as H from "../home/state";
 import { dotOf, money, short, titleOf, useTick, now } from "../home/util";
 import { SearchBox } from "../actions/Search";
-import { useEffect } from "preact/hooks";
+import { useEffect, useState } from "preact/hooks";
 import { group, openByDefault, type Section } from "./groups";
 import { asksTitle, rowCounts } from "../digest/logic";
 import { ago } from "../home/util";
@@ -155,6 +155,14 @@ function Head({ s, open, onToggle }: { s: Section; open: boolean; onToggle: () =
   );
 }
 
+function AppUnpin({ id, name }: { id: string; name: string }) {
+  const [busy, setBusy] = useState(false);
+  return <button class="appunpin" title={`Unpin ${name}`} aria-label={`Unpin ${name}`} disabled={busy} onClick={async () => {
+    setBusy(true);
+    try { await S.unpinApp(id); } finally { setBusy(false); }
+  }}>Unpin</button>;
+}
+
 /** The pinned apps, a section that folds (closed by default); each opens
  * in a tab of its own. */
 function Apps() {
@@ -173,10 +181,13 @@ function Apps() {
       {open && (
         <div class="applist">
           {list.map((a) => (
-            <button key={a.id} class="appchip" title={`Open ${a.name} in a new tab`} onClick={() => void S.openApp(a)}>
-              <span class="appicon">{(a.name.trim()[0] ?? "?").toUpperCase()}</span>
-              <span class="appname">{a.name}</span>
-            </button>
+            <div key={a.id} class="approw">
+              <button class="appchip" title={`Open ${a.name} in a new tab`} onClick={() => void S.openApp(a)}>
+                <span class="appicon">{(a.name.trim()[0] ?? "?").toUpperCase()}</span>
+                <span class="appname">{a.name}</span>
+              </button>
+              <AppUnpin id={a.id} name={a.name} />
+            </div>
           ))}
         </div>
       )}

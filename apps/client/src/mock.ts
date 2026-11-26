@@ -355,6 +355,7 @@ const toolSet = {
 
 export class MockConn implements Api {
   private changed: (() => void)[] = [];
+  private unpinned = new Set<string>();
   onState(f: (s: ConnState) => void) { f("open"); }
   onThreadsChanged(f: () => void) { this.changed.push(f); }
   async call(req: Request): Promise<Reply> {
@@ -499,8 +500,11 @@ export class MockConn implements Api {
     else if (typeof req === "object" && "AppOpen" in req) return { App: { name: "Demo", url: MOCK_APP_URL } };
     else if (req === "Apps") {
       const app = (id: string, name: string, builtin: string | null = null) =>
-        ({ id, name, icon: null, version: "blake3:00", thread: null, url: MOCK_APP_URL, fixed: false, live: null, builtin });
-      return { Apps: { apps: [app("a1", "Dashboard", "dashboard"), app("a2", "Fuel prices"), app("a3", "Leadsheet player")], launcher: null } };
+        ({ id, name, icon: null, version: `blake3:${id}`, thread: null, url: MOCK_APP_URL, fixed: false, live: null, builtin });
+      const apps = [app("a1", "Dashboard", "dashboard"), app("a2", "Fuel prices"), app("a3", "Leadsheet player")];
+      return { Apps: { apps: apps.filter((a) => !this.unpinned.has(a.id)), launcher: null } };
+    } else if (typeof req === "object" && "AppUnpin" in req) {
+      this.unpinned.add(req.AppUnpin.app);
     }
     return "Ok";
   }
