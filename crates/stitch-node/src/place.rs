@@ -1018,7 +1018,8 @@ impl Place {
 /// start when the user is not in it. The file is shared by the node and
 /// the CLI, each with its own copy: every change takes the file's lock,
 /// re-reads it, then writes it back whole (renamed into place), so neither
-/// writes over the other's. One it cannot read is never written over.
+/// writes over the other's. Without the lock, or with a file it cannot
+/// read, it leaves the file alone and changes its copy only.
 #[derive(Debug, Default)]
 pub struct Checkouts {
   path: Option<PathBuf>,
@@ -1150,12 +1151,12 @@ impl Checkouts {
 
   /// Changes the copy and the file: under the file's lock, re-reads it,
   /// applies `f` (which says whether it changed anything), and writes it
-  /// back. A file that cannot be read is not written: the change stays in
-  /// memory. Without the lock (it cannot be taken), the change goes on
-  /// unserialized.
+  /// back. Without the lock, or with a file that cannot be read, the file
+  /// is left alone (an unlocked write could lose another copy's change):
+  /// the change is made to the copy only.
   fn change(&mut self, f: impl FnOnce(&mut BTreeMap<String, Vec<PathBuf>>) -> bool) {
-    let _lock = self.lock();
-    let writable = self.reload();
+    let lock = self.lock();
+    let writable = lock.is_some() && self.reload();
     if f(&mut self.seen) && writable {
       self.write();
     }
@@ -1165,9 +1166,11 @@ impl Checkouts {
   /// (made when missing, never removed), held until it is dropped: every
   /// copy's change, the node's and the CLI's, takes it, so one's re-read,
   /// change and write never interleave with another's. `None` when there is
-  /// no file, or the lock cannot be had (said why).
+  /// no file, or the lock cannot be had (said why): the file is then
+  /// neither read nor written.
   fn lock(&self) -> Option<std::fs::File> {
-    let path = self.path.as_ref()?.with_extension("toml.lock");
+    let file = self.path.as_ref()?;
+    let path = file.with_extension("toml.lock");
     let taken = std::fs::File::options()
       .create(true)
       .truncate(false)
@@ -1178,8 +1181,9 @@ impl Checkouts {
       Ok(f) => Some(f),
       Err(e) => {
         eprintln!(
-          "checkouts: cannot lock {} ({e}): changing it without the lock",
-          path.display()
+          "checkouts: cannot lock {} ({e}): not writing {}; the change is kept in memory",
+          path.display(),
+          file.display()
         );
         None
       }
@@ -1664,6 +1668,33 @@ mod tests {
     std::fs::write(&path, "not = [toml").unwrap();
     a.saw(&other, &y);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [toml");
+    assert_eq!(a.seen.get("proj-a"), Some(&vec![x]));
+    assert_eq!(a.seen.get("proj-b"), Some(&vec![y]));
+  }
+
+  /// Without its lock, `checkouts.toml` is neither read nor written (an
+  /// unlocked change could lose another's): the change is kept in memory.
+  #[test]
+  fn a_checkouts_lock_that_cannot_be_had_leaves_the_file_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(dir.path()).unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let (repo, other) = (
+      "proj-a".parse::<RepoId>().unwrap(),
+      "proj-b".parse::<RepoId>().unwrap(),
+    );
+    let (x, y) = (PathBuf::from("/tmp/x-co"), PathBuf::from("/tmp/y-co"));
+    Checkouts::load(&data).saw(&repo, &x);
+    let path = data.join("checkouts.toml");
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    // The lock is a directory now: opening it for writing fails at once.
+    let lock = data.join("checkouts.toml.lock");
+    let _ = std::fs::remove_file(&lock);
+    std::fs::create_dir(&lock).unwrap();
+    let mut a = Checkouts::load(&data);
+    a.saw(&other, &y);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     assert_eq!(a.seen.get("proj-a"), Some(&vec![x]));
     assert_eq!(a.seen.get("proj-b"), Some(&vec![y]));
   }
