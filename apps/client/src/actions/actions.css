@@ -26,7 +26,7 @@ blockquote.q { margin: 0; padding-left: 12px; border-left: 3px solid var(--mint)
 .mwrap:hover .mact { display: flex; }
 .mact button { padding: 1px 8px; font-size: 12px; border-color: transparent; background: none; }
 .mact button:hover { background: var(--panel2); }
-.mwrap.focus { outline: 2px solid var(--mint); border-radius: 12px; }
+.mwrap.focus, .search-focus { outline: 2px solid var(--mint); border-radius: 12px; }
 .gsearch { padding: 0 12px 8px; }
 .gsearch input { width: 100%; }
 .hits { margin-top: 6px; max-height: 40vh; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }

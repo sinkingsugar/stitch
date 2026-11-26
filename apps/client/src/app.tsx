@@ -1,6 +1,6 @@
 import { RunsOn } from "./runs/RunsOn";
 import { CLIENT_VERSION } from "./version";
-import { useEffect, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useRef, useState } from "preact/hooks";
 import { Component, Fragment } from "preact";
 import { effect } from "@preact/signals";
 import { render as md } from "./markdown";
@@ -290,12 +290,22 @@ function ThreadView() {
   const stick = useRef(true);
   const items = S.entries.value;
   const keys = entryKeys(items);
-  useEffect(() => {
+  const focus = A.focusMsg.value;
+  const route = S.nav.value;
+  const jumped = useRef<typeof focus>(null);
+  useLayoutEffect(() => {
     const el = box.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-    // Opening a thread scrolls to its end; a short one fits whole.
-    if (el) S.atEnd.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-  }, [items, t?.id, S.turn.value?.phase]);
+    if (!el) return;
+    const target = focus && focus.route === route && jumped.current !== focus
+      ? el.querySelector(`[data-did="${CSS.escape(focus.mid)}"]`) : null;
+    if (target) {
+      jumped.current = focus;
+      stick.current = false;
+      target.scrollIntoView({ block: "center" });
+      setTimeout(() => { if (A.focusMsg.peek() === focus) A.focusMsg.value = null; }, 4000);
+    } else if (stick.current) el.scrollTop = el.scrollHeight;
+    S.atEnd.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }, [items, t?.id, S.turn.value?.phase, focus, route]);
   // A new thread is shown pending until the node lists it (it names it before its first step).
   if (showNew.value || (S.creating.value && !t))
     return (

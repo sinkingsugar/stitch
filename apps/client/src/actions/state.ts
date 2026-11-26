@@ -24,7 +24,11 @@ export const menuOpen = signal(false);
 /** Text for the composer to take (a quote); the composer clears it. */
 export const draft = signal<string | null>(null);
 /** A message to scroll to and mark (a search hit). */
-export const focusMsg = signal<string | null>(null);
+export const focusMsg = signal<{ mid: string; route: number } | null>(null);
+export const focusedMid = () => {
+  const focus = focusMsg.value;
+  return focus && focus.route === S.nav.value ? focus.mid : null;
+};
 export const busy = signal<string | null>(null);
 
 /** The "new thread" form is shown (the sidebar's ＋, "Ask about this"); any navigation closes it (app.tsx). */
@@ -174,14 +178,16 @@ export async function search(query: string): Promise<SearchHit[]> {
 
 /** Opens a hit's thread and scrolls to its message when it is shown. */
 export async function openHit(h: SearchHit) {
-  await S.select(h.thread);
-  // Earlier than the transcript's window: read back to it.
-  await S.reveal((e) => "mid" in e && e.mid === `${h.thread}#${h.msg}`);
-  focusMsg.value = h.msg;
-  setTimeout(() => {
-    document.querySelector(`[data-mid="${CSS.escape(h.msg)}"]`)?.scrollIntoView({ block: "center" });
-  }, 150);
-  setTimeout(() => { if (focusMsg.value === h.msg) focusMsg.value = null; }, 4000);
+  focusMsg.value = null;
+  const route = await S.select(h.thread);
+  if (route === undefined || route !== S.nav.peek()) return;
+  const mid = `${h.thread}#${h.msg}`;
+  // Earlier than the transcript's window: read back to the exact source.
+  if (!(await S.reveal((e) => "mid" in e && e.mid === mid, route))) {
+    if (route === S.nav.peek()) S.error.value = "This search result’s message could not be found in the transcript.";
+    return;
+  }
+  if (route === S.nav.peek()) focusMsg.value = { mid, route };
 }
 
 export function quote(text: string) {

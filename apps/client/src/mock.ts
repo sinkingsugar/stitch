@@ -667,6 +667,10 @@ export class MockConn implements Api {
   async transcript(thread: string) {
     const g = generated.find((x) => x.id === thread);
     const own = transcripts[thread] ?? (g ? [user(g.goal), asst(g.last_words || "Working on it.")] : []);
-    return { entries: structuredClone(own), forked_from: forks[thread] ?? null, room: roomInfo(thread), start: 0, earlier: false };
+    const entries = structuredClone(own);
+    for (const e of entries) {
+      if ((e.kind === "user" || e.kind === "assistant") && e.id && !e.inherited) e.mid ??= `${thread}#${e.id}`;
+    }
+    return { entries, forked_from: forks[thread] ?? null, room: roomInfo(thread), start: 0, earlier: false };
   }
 }
