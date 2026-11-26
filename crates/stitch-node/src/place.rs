@@ -1015,7 +1015,9 @@ impl Place {
 
 /// Where this node has seen each project checked out (`checkouts.toml` in
 /// the data directory; local, never synced): where a project's shells
-/// start when the user is not in it.
+/// start when the user is not in it. The file is shared by the node and
+/// the CLI, each with its own copy: every change re-reads it first, then
+/// writes it back, so neither writes over the other's.
 #[derive(Debug, Default)]
 pub struct Checkouts {
   path: Option<PathBuf>,
@@ -1094,6 +1096,7 @@ impl Checkouts {
       }
     }
     if !stale.is_empty() {
+      self.reload();
       if let Some(list) = self.seen.get_mut(repo.as_str()) {
         list.retain(|p| !stale.contains(p));
         if list.is_empty() {
@@ -1143,6 +1146,16 @@ impl Checkouts {
     Ok(())
   }
 
+  /// Replaces the copy with the file as it is now (as `load` reads it).
+  fn reload(&mut self) {
+    if let Some(path) = &self.path {
+      self.seen = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default();
+    }
+  }
+
   fn write(&self) {
     if let Some(path) = &self.path
       && let Ok(text) = toml::to_string(&self.seen)
@@ -1164,6 +1177,7 @@ impl Checkouts {
 
   /// Notes a checkout of `repo`, most recent first.
   pub fn saw(&mut self, repo: &RepoId, top: &Path) {
+    self.reload();
     let list = self.seen.entry(repo.to_string()).or_default();
     if list.first().map(PathBuf::as_path) == Some(top) {
       return;
@@ -1472,6 +1486,37 @@ mod tests {
     let mut seen = Checkouts::load(&data);
     seen.saw(&project, &inner);
     assert_eq!(seen.of(&project, &[]), None);
+  }
+
+  /// The node and the CLI each hold a copy of `checkouts.toml`: a change
+  /// by one is a read-modify-write of the file, not a write of its copy.
+  #[test]
+  fn checkouts_changes_re_read_the_file_shared_with_another_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(dir.path()).unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let repo = "proj-y".parse::<RepoId>().unwrap();
+    let other = "proj-z".parse::<RepoId>().unwrap();
+    let (x, y) = (
+      PathBuf::from("/tmp/x-checkout"),
+      PathBuf::from("/tmp/y-checkout"),
+    );
+    let mut a = Checkouts::load(&data);
+    let mut b = Checkouts::load(&data);
+    a.saw(&repo, &x);
+
+    // The other copy (the CLI) forgot X and wrote the file without it:
+    // `a` still has X first in memory, and must write it back.
+    std::fs::write(data.join("checkouts.toml"), "").unwrap();
+    a.saw(&repo, &x);
+    assert_eq!(Checkouts::load(&data).seen[repo.as_str()], vec![x.clone()]);
+
+    // A checkout noted by `b` meanwhile is not dropped by `a`'s change.
+    b.saw(&other, &y);
+    a.saw(&repo, &y);
+    let file = Checkouts::load(&data);
+    assert_eq!(file.seen[other.as_str()], vec![y.clone()]);
+    assert_eq!(file.seen[repo.as_str()], vec![y.clone(), x.clone()]);
   }
 
   #[test]
