@@ -454,7 +454,7 @@ function unstash(id: string): O.UserEntry[] {
  * opens as the newest (its transcript has the earlier part, above a divider),
  * unless `asWas` (the divider's link to it: read as it was, `latest` naming
  * where it goes on). */
-export async function select(id: string, asWas = false, how: "push" | "replace" | "none" = "push") {
+export async function select(id: string, asWas = false, how: "push" | "replace" | "none" = "push"): Promise<number | undefined> {
   // The URL and its history entry first: whether the map is on screen decides the back button.
   Nav.opening(id, how);
   void flushRead();
@@ -472,38 +472,41 @@ export async function select(id: string, asWas = false, how: "push" | "replace" 
   speaking.value = null;
   { const r = threads.value.find((x) => x.id === id); room.value = r ? roomOfRow(r) : null; }
   homeView.value = false;
-  nav.value++;
+  const opened = nav.peek() + 1;
+  nav.value = opened;
   entries.value = unstash(id);
   transcriptWindow.value = null;
   forkedFrom.value = null;
   if (!(id in extra.value)) extra.value = {};
   const [now] = await Promise.all([reload(id), readExtra(id)]);
   // Compacted since (a link, a notification, a list not refreshed yet).
-  if (selected.value === id && now && now !== id) {
+  if (nav.peek() !== opened) return;
+  if (now && now !== id) {
     if (!asWas) return select(now, false, how === "none" ? "none" : "replace");
     latest.value = now;
   }
-  if (selected.value === id)
-    unfollow = api.follow(id, (f) => {
-      if ("gap" in f) reloadSoon();
-      else if ("turn" in f) { if (selected.value === id) turnStatus.value = f.turn; }
-      else apply(id, f.event);
-    });
+  unfollow = api.follow(id, (f) => {
+    if ("gap" in f) reloadSoon();
+    else if ("turn" in f) { if (selected.value === id) turnStatus.value = f.turn; }
+    else apply(id, f.event);
+  });
+  return opened;
 }
 
 /** Reads the transcript again (after a gap, or a turn's end). What arrived
  * from the turn's stream meanwhile is kept after it. */
-let reading = false;
-let readAgain = false;
+let reading: { nav: number; again: boolean } | null = null;
 /** The newest thread of the open one's compaction chain, as its transcript
  * said (`Transcript.current`). */
 async function reload(id: string): Promise<string | undefined> {
-  if (reading) { readAgain = true; return; }
-  reading = true;
+  const route = nav.peek();
+  if (reading?.nav === route) { reading.again = true; return; }
+  const read = { nav: route, again: false };
+  reading = read;
   let current: string | undefined;
   try {
     do {
-      readAgain = false;
+      read.again = false;
       const keep = entries.value.length;
       // Opening: the conversation's end. Again: from the window's start on
       // (what "Show earlier" read stays); a rewind to before it, the end anew.
@@ -514,7 +517,7 @@ async function reload(id: string): Promise<string | undefined> {
         t = await api.transcript(id, { tail: WINDOW });
         fresh = true;
       }
-      if (selected.value !== id) break;
+      if (nav.peek() !== route || selected.value !== id) break;
       current = t.current;
       // While a turn runs, the stream's newer entries (past what was here when
       // reading began) go after the node's; at its end the node's are all.
@@ -526,40 +529,53 @@ async function reload(id: string): Promise<string | undefined> {
       entries.value = O.merge([...head, ...t.entries, ...tail], O.locals(entries.value));
       forkedFrom.value = t.forked_from;
       room.value = t.room ?? null;
-    } while (readAgain);
+    } while (read.again);
   } catch (e) {
-    error.value = String(e);
+    if (nav.peek() === route) error.value = String(e);
   } finally {
-    reading = false;
+    if (reading === read) reading = null;
   }
   return current;
 }
 
+let earlierRead: { route: number; done: Promise<boolean> } | null = null;
 /** Reads the window before the open transcript's ("Show earlier"): false
  * when there is none, or it could not. */
-export async function loadEarlier(): Promise<boolean> {
-  const id = selected.value;
-  const w = transcriptWindow.value;
-  if (!id || !w?.earlier || loadingEarlier.value) return false;
+export function loadEarlier(): Promise<boolean> {
+  const id = selected.peek();
+  const w = transcriptWindow.peek();
+  const route = nav.peek();
+  if (!id || !w?.earlier) return Promise.resolve(false);
+  if (earlierRead?.route === route) return earlierRead.done;
   loadingEarlier.value = true;
-  try {
-    const t = await api.transcript(id, { before: w.start, tail: WINDOW });
-    if (selected.value !== id || transcriptWindow.value !== w) return false;
-    entries.value = [...t.entries, ...entries.value];
-    transcriptWindow.value = { start: t.start, earlier: t.earlier };
-    return true;
-  } catch (e) {
-    error.value = String(e);
-    return false;
-  } finally {
-    loadingEarlier.value = false;
-  }
+  const done = (async () => {
+    try {
+      const t = await api.transcript(id, { before: w.start, tail: WINDOW });
+      if (nav.peek() !== route || transcriptWindow.peek() !== w || t.start >= w.start) return false;
+      entries.value = [...t.entries, ...entries.peek()];
+      transcriptWindow.value = { start: t.start, earlier: t.earlier };
+      return true;
+    } catch (e) {
+      if (nav.peek() === route) error.value = String(e);
+      return false;
+    } finally {
+      if (earlierRead?.route === route) {
+        earlierRead = null;
+        loadingEarlier.value = false;
+      }
+    }
+  })();
+  earlierRead = { route, done };
+  return done;
 }
 
 /** Reads earlier windows until an entry matches (a digest item's or a
  * search hit's message), or there are none. */
-export async function reveal(match: (e: Entry) => boolean) {
-  for (let i = 0; i < 100 && !entries.value.some(match); i++) if (!(await loadEarlier())) break;
+export async function reveal(match: (e: Entry) => boolean, route = nav.peek()): Promise<boolean> {
+  for (let i = 0; i < 100 && nav.peek() === route && !entries.peek().some(match); i++) {
+    if (!(await loadEarlier())) break;
+  }
+  return nav.peek() === route && entries.peek().some(match);
 }
 
 export function apply(id: string, e: LiveEvent) {
