@@ -1519,6 +1519,83 @@ mod tests {
     assert_eq!(file.seen[repo.as_str()], vec![y.clone(), x.clone()]);
   }
 
+  /// The issue's sequence with real checkouts: the CLI (`project ls`)
+  /// forgets a checkout that holds another repository now and writes the
+  /// file without it; the node's rebind then notes it again, from a copy
+  /// that still has it first. Each change keeps the other copy's entries.
+  #[test]
+  fn a_checkout_the_cli_forgot_is_noted_again_by_the_nodes_rebind() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = std::fs::canonicalize(dir.path()).unwrap();
+    let data = d.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let (app, old) = (d.join("app"), d.join("old-app"));
+    repo(&app, None);
+    run(
+      &d,
+      &[
+        "clone",
+        "--quiet",
+        app.to_str().unwrap(),
+        old.to_str().unwrap(),
+      ],
+    );
+    let project = project_of(&Checkout::of(&app).unwrap(), &[]);
+    let file = || Checkouts::load(&data).seen;
+
+    // The node noted `old` then `app` (first); the CLI loaded the file.
+    let mut node = Checkouts::load(&data);
+    node.saw(&project, &old);
+    node.saw(&project, &app);
+    let mut cli = Checkouts::load(&data);
+    assert_eq!(file()[project.as_str()], vec![app.clone(), old.clone()]);
+
+    // Meanwhile the node notes a checkout of another project.
+    let other = "other-project".parse::<RepoId>().unwrap();
+    let elsewhere = d.join("elsewhere");
+    node.saw(&other, &elsewhere);
+
+    // `app` now holds another repository: the CLI forgets it and writes
+    // the file, which keeps what the node noted meanwhile.
+    std::fs::remove_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+    run(&app, &["init", "--quiet"]);
+    run(
+      &app,
+      &[
+        "-c",
+        "user.name=T",
+        "-c",
+        "user.email=t@example.com",
+        "commit",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "another project",
+      ],
+    );
+    assert_ne!(project_of(&Checkout::of(&app).unwrap(), &[]), project);
+    assert_eq!(cli.of(&project, &[]), Some(old.clone()));
+    assert_eq!(file()[project.as_str()], vec![old.clone()]);
+    assert_eq!(file()[other.as_str()], vec![elsewhere.clone()]);
+
+    // The node notes another path of the project: only that path is
+    // added, `app` is not resurrected from its copy.
+    let third = d.join("third");
+    node.saw(&project, &third);
+    assert_eq!(file()[project.as_str()], vec![third.clone(), old.clone()]);
+    assert_eq!(file()[other.as_str()], vec![elsewhere.clone()]);
+
+    // The rebind notes `app` again (`Node::reroot`): written, though the
+    // node's copy had it first before.
+    node.saw(&project, &app);
+    assert_eq!(
+      file()[project.as_str()],
+      vec![app.clone(), third.clone(), old.clone()]
+    );
+    assert_eq!(file()[other.as_str()], vec![elsewhere]);
+  }
+
   #[test]
   fn some_folders_never_sync_and_the_rest_ask() {
     use stitch_store::{RecordRoot, Role};
