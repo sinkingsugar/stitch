@@ -1016,8 +1016,9 @@ impl Place {
 /// Where this node has seen each project checked out (`checkouts.toml` in
 /// the data directory; local, never synced): where a project's shells
 /// start when the user is not in it. The file is shared by the node and
-/// the CLI, each with its own copy: every change re-reads it first, then
-/// writes it back, so neither writes over the other's.
+/// the CLI, each with its own copy: every change takes the file's lock,
+/// re-reads it, then writes it back whole (renamed into place), so neither
+/// writes over the other's. One it cannot read is never written over.
 #[derive(Debug, Default)]
 pub struct Checkouts {
   path: Option<PathBuf>,
@@ -1096,17 +1097,18 @@ impl Checkouts {
       }
     }
     if !stale.is_empty() {
-      self.reload();
-      if let Some(list) = self.seen.get_mut(repo.as_str()) {
-        list.retain(|p| !stale.contains(p));
-        if list.is_empty() {
-          self.seen.remove(repo.as_str());
+      self.change(|seen| {
+        if let Some(list) = seen.get_mut(repo.as_str()) {
+          list.retain(|p| !stale.contains(p));
+          if list.is_empty() {
+            seen.remove(repo.as_str());
+          }
         }
-      }
+        true
+      });
       for p in stale {
         self.checked.remove(&(repo.to_string(), p));
       }
-      self.write();
     }
     found
   }
@@ -1146,21 +1148,91 @@ impl Checkouts {
     Ok(())
   }
 
-  /// Replaces the copy with the file as it is now (as `load` reads it).
-  fn reload(&mut self) {
-    if let Some(path) = &self.path {
-      self.seen = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| toml::from_str(&t).ok())
-        .unwrap_or_default();
+  /// Changes the copy and the file: under the file's lock, re-reads it,
+  /// applies `f` (which says whether it changed anything), and writes it
+  /// back. A file that cannot be read is not written: the change stays in
+  /// memory. Without the lock (it cannot be taken), the change goes on
+  /// unserialized.
+  fn change(&mut self, f: impl FnOnce(&mut BTreeMap<String, Vec<PathBuf>>) -> bool) {
+    let _lock = self.lock();
+    let writable = self.reload();
+    if f(&mut self.seen) && writable {
+      self.write();
     }
   }
 
+  /// Takes the exclusive lock on `checkouts.toml.lock` beside the file
+  /// (made when missing, never removed), held until it is dropped: every
+  /// copy's change, the node's and the CLI's, takes it, so one's re-read,
+  /// change and write never interleave with another's. `None` when there is
+  /// no file, or the lock cannot be had (said why).
+  fn lock(&self) -> Option<std::fs::File> {
+    let path = self.path.as_ref()?.with_extension("toml.lock");
+    let taken = std::fs::File::options()
+      .create(true)
+      .truncate(false)
+      .write(true)
+      .open(&path)
+      .and_then(|f| f.lock().map(|()| f));
+    match taken {
+      Ok(f) => Some(f),
+      Err(e) => {
+        eprintln!(
+          "checkouts: cannot lock {} ({e}): changing it without the lock",
+          path.display()
+        );
+        None
+      }
+    }
+  }
+
+  /// Replaces the copy with the file as it is now; whether the file may
+  /// be written. A missing file is empty. One that cannot be read, or not
+  /// as a `checkouts.toml`, leaves the copy as it was, and is not to be
+  /// written over with a guess.
+  fn reload(&mut self) -> bool {
+    let Some(path) = &self.path else {
+      return false;
+    };
+    let text = match std::fs::read_to_string(path) {
+      Ok(text) => text,
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+      Err(e) => {
+        eprintln!(
+          "checkouts: cannot read {} ({e}): not writing it; the change is kept in memory",
+          path.display()
+        );
+        return false;
+      }
+    };
+    match toml::from_str(&text) {
+      Ok(seen) => {
+        self.seen = seen;
+        true
+      }
+      Err(e) => {
+        eprintln!(
+          "checkouts: cannot parse {} ({e}): not writing it; the change is kept in memory",
+          path.display()
+        );
+        false
+      }
+    }
+  }
+
+  /// Writes the copy whole: to `checkouts.toml.tmp`, then renamed over the
+  /// file, so a reader sees the old file or the new one, never part of one.
   fn write(&self) {
-    if let Some(path) = &self.path
-      && let Ok(text) = toml::to_string(&self.seen)
-    {
-      let _ = std::fs::write(path, text);
+    let Some(path) = &self.path else {
+      return;
+    };
+    let Ok(text) = toml::to_string(&self.seen) else {
+      return;
+    };
+    let tmp = path.with_extension("toml.tmp");
+    if let Err(e) = std::fs::write(&tmp, text).and_then(|()| std::fs::rename(&tmp, path)) {
+      eprintln!("checkouts: cannot write {} ({e})", path.display());
+      let _ = std::fs::remove_file(&tmp);
     }
   }
 
@@ -1177,14 +1249,15 @@ impl Checkouts {
 
   /// Notes a checkout of `repo`, most recent first.
   pub fn saw(&mut self, repo: &RepoId, top: &Path) {
-    self.reload();
-    let list = self.seen.entry(repo.to_string()).or_default();
-    if list.first().map(PathBuf::as_path) == Some(top) {
-      return;
-    }
-    list.retain(|p| p != top);
-    list.insert(0, top.to_owned());
-    self.write();
+    self.change(|seen| {
+      let list = seen.entry(repo.to_string()).or_default();
+      if list.first().map(PathBuf::as_path) == Some(top) {
+        return false;
+      }
+      list.retain(|p| p != top);
+      list.insert(0, top.to_owned());
+      true
+    });
   }
 }
 
@@ -1517,6 +1590,82 @@ mod tests {
     let file = Checkouts::load(&data);
     assert_eq!(file.seen[other.as_str()], vec![y.clone()]);
     assert_eq!(file.seen[repo.as_str()], vec![y.clone(), x.clone()]);
+  }
+
+  /// Two writers overlapping: while `a` holds the lock between its read
+  /// and its write, `b`'s change waits for it, then reads `a`'s write; the
+  /// file ends with both. (The lock is `flock`'s, per open file: two opens
+  /// in one process contend as two processes do.)
+  #[test]
+  fn overlapping_checkouts_changes_wait_for_the_lock_and_keep_both() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(dir.path()).unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let (repo, other) = (
+      "proj-a".parse::<RepoId>().unwrap(),
+      "proj-b".parse::<RepoId>().unwrap(),
+    );
+    let (x, y) = (PathBuf::from("/tmp/x-co"), PathBuf::from("/tmp/y-co"));
+    let mut a = Checkouts::load(&data);
+    let mut b = Checkouts::load(&data);
+
+    // `a` takes the lock as its change does, and reads the file.
+    let lock = std::fs::File::options()
+      .create(true)
+      .truncate(false)
+      .write(true)
+      .open(data.join("checkouts.toml.lock"))
+      .unwrap();
+    lock.lock().unwrap();
+    let _ = a.reload();
+
+    // `b`'s change, meanwhile, waits for the lock.
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+      b.saw(&other, &y);
+      done.send(()).unwrap();
+    });
+    assert!(
+      finished
+        .recv_timeout(std::time::Duration::from_millis(300))
+        .is_err(),
+      "b's change did not wait for the lock a holds"
+    );
+
+    // `a` writes its change and lets go: `b` goes on, from `a`'s write.
+    a.seen
+      .entry(repo.to_string())
+      .or_default()
+      .insert(0, x.clone());
+    a.write();
+    drop(lock);
+    writer.join().unwrap();
+    let file = Checkouts::load(&data).seen;
+    assert_eq!(file.get("proj-a"), Some(&vec![x]));
+    assert_eq!(file.get("proj-b"), Some(&vec![PathBuf::from("/tmp/y-co")]));
+  }
+
+  /// A `checkouts.toml` that cannot be read as one is never written over:
+  /// the change is kept in memory only, with the copy's other entries.
+  #[test]
+  fn a_corrupt_checkouts_file_is_not_written_over() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = std::fs::canonicalize(dir.path()).unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let (repo, other) = (
+      "proj-a".parse::<RepoId>().unwrap(),
+      "proj-b".parse::<RepoId>().unwrap(),
+    );
+    let (x, y) = (PathBuf::from("/tmp/x-co"), PathBuf::from("/tmp/y-co"));
+    let mut a = Checkouts::load(&data);
+    a.saw(&repo, &x);
+
+    let path = data.join("checkouts.toml");
+    std::fs::write(&path, "not = [toml").unwrap();
+    a.saw(&other, &y);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [toml");
+    assert_eq!(a.seen.get("proj-a"), Some(&vec![x]));
+    assert_eq!(a.seen.get("proj-b"), Some(&vec![y]));
   }
 
   /// The issue's sequence with real checkouts: the CLI (`project ls`)
