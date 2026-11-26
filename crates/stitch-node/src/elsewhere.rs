@@ -42,6 +42,22 @@ enum Unasked {
 
 /// Asks peer `node` a question, reaching it within `CONNECT`.
 async fn ask(s: &Arc<Shared>, node: &str, q: &Question) -> std::result::Result<Reply, Unasked> {
+  ask_how(s, node, q, None).await
+}
+
+/// How long a question that may be asked twice waits for its answer on a
+/// kept connection before it is asked again on a fresh one.
+const QUICK_REPLY: Duration = Duration::from_secs(6);
+
+/// Asks peer `node` a question, reaching it within `CONNECT`; `again`: one
+/// that may be asked twice and is answered at once, its answer waited for
+/// that long on a kept connection before a fresh one is dialed.
+async fn ask_how(
+  s: &Arc<Shared>,
+  node: &str,
+  q: &Question,
+  again: Option<Duration>,
+) -> std::result::Result<Reply, Unasked> {
   let state = s.state().clone();
   let name = node.to_owned();
   let peer = tokio::task::spawn_blocking(move || state.find_peer(&name))
@@ -52,14 +68,14 @@ async fn ask(s: &Arc<Shared>, node: &str, q: &Question) -> std::result::Result<R
     .ok_or(Unasked::Unreachable)?;
   let addr = peer.addr().map_err(|_| Unasked::Unreachable)?;
   let question = postcard::to_stdvec(q).map_err(|e| Unasked::Failed(e.to_string()))?;
-  let asked = s
-    .net
-    .ask_within(addr, question, CONNECT)
-    .await
-    .map_err(|e| match e {
-      stitch_net::AskError::Unreachable(_) => Unasked::Unreachable,
-      stitch_net::AskError::Failed(e) => Unasked::Failed(e.to_string()),
-    })?;
+  let asked = match again {
+    None => s.net.ask_within(addr, question, CONNECT).await,
+    Some(reply) => s.net.ask_again_within(addr, question, CONNECT, reply).await,
+  }
+  .map_err(|e| match e {
+    stitch_net::AskError::Unreachable(_) => Unasked::Unreachable,
+    stitch_net::AskError::Failed(e) => Unasked::Failed(e.to_string()),
+  })?;
   match postcard::from_bytes::<Reply>(&asked) {
     Ok(Reply::Error(e)) if e.starts_with("a question this node does not know") => {
       Err(Unasked::Unknown)
@@ -254,7 +270,10 @@ pub(crate) async fn ring_outcome(
     call: call.to_owned(),
     outcome: outcome.to_owned(),
   };
-  match ask(s, node, &q).await {
+  // Asked again on a fresh connection when the kept one is dead: a phone
+  // woken by the call's push holds connections its peers dropped while it
+  // was suspended, and the call's outcome cannot wait for them to time out.
+  match ask_how(s, node, &q, Some(QUICK_REPLY)).await {
     Ok(Reply::Error(e)) => Err(Error::Config(e)),
     Ok(_) => Ok(()),
     Err(Unasked::Unreachable) => Err(Error::Config(format!("{node} is not reachable now"))),

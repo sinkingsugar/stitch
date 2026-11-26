@@ -658,6 +658,9 @@ pub struct Ring<'a> {
   pub call: &'a str,
   /// The thread that calls: answering opens a voice call with it.
   pub thread: Option<&'a str>,
+  /// The repository the thread is in: answering syncs it alone from the
+  /// node that calls, not every repository with every peer.
+  pub repo: Option<&'a str>,
   /// The node that calls (the phone tells it how the call went, and syncs
   /// the thread from it).
   pub node: &'a str,
@@ -677,6 +680,7 @@ impl Ring<'_> {
     json!({
       "ring": self.call,
       "thread": self.thread,
+      "repo": self.repo,
       "node": self.node,
       "caller": self.caller,
       "title": self.title,
@@ -889,6 +893,7 @@ mod tests {
         &Ring {
           call: &call,
           thread: thread.as_deref(),
+          repo: None,
           node: &node,
           caller: &reason,
           title: None,
@@ -978,6 +983,7 @@ mod tests {
     let ring = Ring {
       call: "6f1c2a8e-0b7d-4c3e-9a51-2d4f8e7b6a90",
       thread: Some("2026-11-25T183933Z-beast-2d4j"),
+      repo: Some("p-42ada59c2195414f"),
       node: "beast",
       caller: "Stitch: the build on beast is stuck",
       title: Some("Nightly build"),
@@ -987,6 +993,7 @@ mod tests {
     assert_eq!(c["ring"], "6f1c2a8e-0b7d-4c3e-9a51-2d4f8e7b6a90");
     assert_eq!(c["thread"], "2026-11-25T183933Z-beast-2d4j");
     assert_eq!(c["node"], "beast");
+    assert_eq!(c["repo"], "p-42ada59c2195414f");
     assert_eq!(c["caller"], "Stitch: the build on beast is stuck");
     assert_eq!(c["at"], 1_795_000_000);
     assert_eq!(ring_payload("SEALED"), json!({"e": "SEALED"}));

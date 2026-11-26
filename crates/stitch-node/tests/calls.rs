@@ -3,8 +3,12 @@
 //! call as a VoIP push through the relay (a mock here), sealed for the
 //! phone; the phone, opening it, tells the Mac how it went
 //! (`Request::RingOutcome` on its own node, passed on as
-//! `Question::Ring`), and the waiting tool says so to the model. A second
-//! call right after is refused by the node's limit.
+//! `Question::Ring`), and the waiting tool says so to the model. Answered,
+//! the phone syncs the thread's repository alone from the Mac and sends
+//! the user's first words into the waiting turn, whose reply streams to
+//! the phone; answered late (the tool gave up), those words start a turn
+//! of their own, its reply streamed as well. A second call right after is
+//! refused by the node's limit.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -254,22 +258,22 @@ fn chat(text: &str) -> Request {
   }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_call_rings_the_phone_and_its_answer_reaches_the_agent() {
-  let dir = tempfile::tempdir().unwrap();
-  let d = dir.path();
+/// Two nodes, the phone (which registered for calls) and the Mac (whose
+/// model answers `mac_answers` in order, its pushes to `relay`'s mock).
+struct Pair {
+  phone: std::path::PathBuf,
+  p: Client,
+  mac_sent: Arc<Mutex<Vec<(String, Value)>>>,
+  relayed: Arc<Mutex<Vec<(String, Value)>>>,
+  private: [u8; 32],
+  voip: String,
+  _nodes: (stitch_node::NodeHandle, stitch_node::NodeHandle),
+}
+
+async fn pair(d: &Path, mac_answers: Vec<String>) -> Pair {
   let (phone_api, _) = serve(vec![]).await;
-  let (mac_api, mac_sent) = serve(vec![
-    tool_call(
-      "c1",
-      "call_user",
-      json!({"reason": "the build on beast is stuck"}),
-    ),
-    tool_call("c2", "call_user", json!({"reason": "still stuck"})),
-    answer("Calling you about the build."),
-  ])
-  .await;
-  let (relay, relayed) = serve(vec![OK.to_owned()]).await;
+  let (mac_api, mac_sent) = serve(mac_answers).await;
+  let (relay, relayed) = serve(vec![OK.to_owned(), OK.to_owned()]).await;
   let (phone, mac) = (d.join("phone"), d.join("mac"));
   let (phone_port, mac_port) = (free_port(), free_port());
   config(&phone, "phone", phone_port, &phone_api);
@@ -285,13 +289,13 @@ async fn a_call_rings_the_phone_and_its_answer_reaches_the_agent() {
     .unwrap()
     .refresh(&home)
     .unwrap();
-  let _phone_node = stitch_node::start(&phone).await.unwrap();
+  let phone_node = stitch_node::start(&phone).await.unwrap();
   let mut p = Client::connect(&phone).await.unwrap();
   let Reply::Ticket(ticket) = p.request(&Request::Invite { ttl_secs: 60 }).await.unwrap() else {
     panic!()
   };
   join(&mac, "mac", mac_port, &ticket.parse().unwrap()).await;
-  let _mac_node = stitch_node::start(&mac).await.unwrap();
+  let mac_node = stitch_node::start(&mac).await.unwrap();
   let mut m = Client::connect(&mac).await.unwrap();
 
   // The phone registers for calls: its PushKit token, its push key.
@@ -315,56 +319,210 @@ async fn a_call_rings_the_phone_and_its_answer_reaches_the_agent() {
       .any(|r| r.fields["voip"] == json!(voip))
   })
   .await;
+  Pair {
+    phone,
+    p,
+    mac_sent,
+    relayed,
+    private,
+    voip,
+    _nodes: (phone_node, mac_node),
+  }
+}
+
+impl Pair {
+  /// The call the relay was given (the `n`th), opened as the phone does.
+  async fn rung(&self, n: usize) -> Value {
+    until("the VoIP push at the relay", || {
+      self.relayed.lock().unwrap().len() > n
+    })
+    .await;
+    let (path, body) = self.relayed.lock().unwrap()[n].clone();
+    assert_eq!(path, "/voip");
+    assert_eq!(body["token"], json!(self.voip));
+    assert_eq!(body["env"], "sandbox");
+    // Nothing in the clear but the token: the call is sealed for the phone.
+    assert_eq!(body.as_object().unwrap().len(), 3, "{body}");
+    let sealed =
+      stitch_node::apns::open(&self.private, body["e"].as_str().unwrap()).expect("opens");
+    serde_json::from_slice(&sealed).unwrap()
+  }
+
+  async fn outcome(&mut self, call: &Value, outcome: &str) -> Reply {
+    self
+      .p
+      .request(&Request::RingOutcome {
+        node: "mac".into(),
+        call: call["ring"].as_str().unwrap().into(),
+        outcome: outcome.into(),
+      })
+      .await
+      .unwrap()
+  }
+
+  /// What the phone does once the user picked up: the thread's repository
+  /// synced from the Mac alone (the push says which), then the user's
+  /// first words sent into the thread there, its turn streamed here; what
+  /// was said, once that turn ended.
+  fn pick_up(&mut self, call: &Value) -> tokio::task::JoinHandle<String> {
+    let phone = self.phone.clone();
+    let call = call.clone();
+    tokio::spawn(async move {
+      let mut p = Client::connect(&phone).await.unwrap();
+      let thread = call["thread"].as_str().unwrap().to_owned();
+      let repo = call["repo"]
+        .as_str()
+        .expect("the push names the thread's repository");
+      let r = p
+        .request(&Request::SyncRepo {
+          peer: "mac".into(),
+          repo: repo.into(),
+        })
+        .await
+        .unwrap();
+      assert!(matches!(r, Reply::Synced(_)), "{r:?}");
+      // The app's chats go to the thread's owner by default; a socket
+      // client's, once the thread is set to run there.
+      p.request(&Request::RunOn {
+        thread: thread.clone(),
+        node: Some("mac".into()),
+      })
+      .await
+      .unwrap();
+      let mut req = chat("(I picked up your call.)");
+      if let Request::Chat {
+        thread: t, spoken, ..
+      } = &mut req
+      {
+        *t = Some(thread);
+        *spoken = true;
+      }
+      let mut said = String::new();
+      let done = p
+        .chat(&req, |r| {
+          if let Reply::Text(t) = r {
+            said.push_str(t);
+          }
+          None
+        })
+        .await
+        .unwrap();
+      assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
+      said
+    })
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_rings_the_phone_and_its_answer_reaches_the_agent() {
+  let dir = tempfile::tempdir().unwrap();
+  let mut pair = pair(
+    dir.path(),
+    vec![
+      tool_call(
+        "c1",
+        "call_user",
+        json!({"reason": "the build on beast is stuck"}),
+      ),
+      tool_call("c2", "call_user", json!({"reason": "still stuck"})),
+      answer("Calling you about the build."),
+    ],
+  )
+  .await;
 
   // The Mac's agent calls; the turn waits for the phone's word.
+  let mut m = Client::connect(&dir.path().join("mac")).await.unwrap();
   let turn = tokio::spawn(async move { m.chat(&chat("watch the build"), |_| None).await });
-  until("the VoIP push at the relay", || {
-    !relayed.lock().unwrap().is_empty()
-  })
-  .await;
-  let (path, body) = relayed.lock().unwrap()[0].clone();
-  assert_eq!(path, "/voip");
-  assert_eq!(body["token"], json!(voip));
-  assert_eq!(body["env"], "sandbox");
-  // Nothing in the clear but the token: the call is sealed for the phone.
-  assert_eq!(body.as_object().unwrap().len(), 3, "{body}");
-  let sealed = stitch_node::apns::open(&private, body["e"].as_str().unwrap()).expect("opens");
-  let call: Value = serde_json::from_slice(&sealed).unwrap();
+  let call = pair.rung(0).await;
   assert_eq!(call["node"], "mac");
   assert_eq!(call["caller"], "Stitch: the build on beast is stuck");
   assert!(call["thread"].as_str().unwrap().contains("-mac-"), "{call}");
-  let id = call["ring"].as_str().unwrap().to_owned();
 
   // An outcome for a call nobody rang is said, not taken.
-  let r = p
+  let r = pair
+    .p
     .request(&Request::RingOutcome {
       node: "mac".into(),
-      call: id.clone(),
+      call: call["ring"].as_str().unwrap().into(),
       outcome: "maybe".into(),
     })
     .await;
   assert!(!matches!(r, Ok(Reply::Ok)), "{r:?}");
-  // The user answers on the phone.
-  let r = p
-    .request(&Request::RingOutcome {
-      node: "mac".into(),
-      call: id,
-      outcome: "answered".into(),
-    })
-    .await
-    .unwrap();
+  // The user answers on the phone: said at once, before anything else.
+  let r = pair.outcome(&call, "answered").await;
   assert!(matches!(r, Reply::Ok), "{r:?}");
+  // The tool waits on for the first words, which come once the phone
+  // synced the thread; the reply to them streams to the phone's call.
+  let said = pair.pick_up(&call);
+  let said = tokio::time::timeout(Duration::from_secs(30), said)
+    .await
+    .expect("the phone's chat ends with the turn")
+    .unwrap();
+  assert!(said.contains("Calling you about the build."), "{said:?}");
   let done = tokio::time::timeout(Duration::from_secs(30), turn)
     .await
     .expect("the turn ends once the phone said")
     .unwrap()
     .unwrap();
   assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
-  let bodies = mac_sent.lock().unwrap();
+  let bodies = pair.mac_sent.lock().unwrap();
   let first = result_of(&bodies[1].1, "c1");
-  assert!(first.contains("The user answered"), "{first}");
+  assert!(
+    first.contains("The user answered: they are on a voice call"),
+    "{first}"
+  );
+  // The first words were woven in right after the tool's result.
+  assert!(
+    bodies[1].1.to_string().contains("(I picked up your call.)"),
+    "{}",
+    bodies[1].1
+  );
   // A second call at once: the node's limit, said to the model.
   let second = result_of(&bodies[2].1, "c2");
   assert!(second.contains("not called"), "{second}");
-  assert_eq!(relayed.lock().unwrap().len(), 1, "rung once");
+  assert_eq!(pair.relayed.lock().unwrap().len(), 1, "rung once");
+}
+
+/// The phone's answer reaches the Mac after the tool gave up (a slow link,
+/// the phone's 30 seconds): the user's first words still reach the thread,
+/// as a turn of its own, and its reply streams to the phone's call.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_after_the_tool_gave_up_still_reaches_the_agent() {
+  let dir = tempfile::tempdir().unwrap();
+  let mut pair = pair(
+    dir.path(),
+    vec![
+      tool_call("c1", "call_user", json!({"reason": "deploy failed"})),
+      answer("No answer; I sent a notification."),
+      answer("Hi, I called about the deploy."),
+    ],
+  )
+  .await;
+  let mut m = Client::connect(&dir.path().join("mac")).await.unwrap();
+  let turn = tokio::spawn(async move { m.chat(&chat("watch the deploy"), |_| None).await });
+  let call = pair.rung(0).await;
+  // No word in time: the phone's own "missed" stands for the tool's wait.
+  let r = pair.outcome(&call, "missed").await;
+  assert!(matches!(r, Reply::Ok), "{r:?}");
+  tokio::time::timeout(Duration::from_secs(30), turn)
+    .await
+    .expect("the turn ends, missed")
+    .unwrap()
+    .unwrap();
+  // The answer, late: taken without error, though nothing waits for it.
+  let r = pair.outcome(&call, "answered").await;
+  assert!(matches!(r, Reply::Ok), "{r:?}");
+  let said = tokio::time::timeout(Duration::from_secs(30), pair.pick_up(&call))
+    .await
+    .expect("the phone's chat ends with the turn its words started")
+    .unwrap();
+  assert!(said.contains("Hi, I called about the deploy."), "{said:?}");
+  let bodies = pair.mac_sent.lock().unwrap();
+  let missed = result_of(&bodies[1].1, "c1");
+  assert!(missed.contains("pick up late"), "{missed}");
+  assert!(
+    bodies[2].1.to_string().contains("(I picked up your call.)"),
+    "{}",
+    bodies[2].1
+  );
 }

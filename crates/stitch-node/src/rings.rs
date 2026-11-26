@@ -43,10 +43,15 @@ pub(crate) const GAP: Duration = Duration::from_secs(5 * 60);
 pub(crate) const AFTER_DECLINE: Duration = Duration::from_secs(30 * 60);
 /// How long the node waits for the phone to say how the call went: the
 /// phone gives up ringing after 30 seconds and says so; answered, it says
-/// so once the voice call is set up (the thread synced, its first words
-/// sent: seconds), so they are woven in with the answer. This is for a
-/// phone that never says.
+/// so at once (before it syncs or sets anything up). This is for a phone
+/// that never says.
 pub(crate) const WAIT: Duration = Duration::from_secs(60);
+/// Answered, how long the tool waits on for the user's first words (the
+/// phone sends them into this turn once its voice call is on and the
+/// thread synced, over a link that may be slow), so the model's next reply
+/// answers them and is read aloud. Past this, the tool says they are on
+/// their way: they come woven in later, or as a turn of their own.
+pub(crate) const GREET: Duration = Duration::from_secs(30);
 /// The longest reason: it is the caller line on a lock screen.
 const MAX_REASON: usize = 80;
 
@@ -226,7 +231,11 @@ fn caller(reason: &str) -> String {
 pub(crate) enum Rang {
   /// No phone can ring: a notification went instead.
   CannotRing(Vec<String>),
-  Answered,
+  /// The user answered; `greeted`: their first words came within `GREET`
+  /// (woven in after this), else they are on their way.
+  Answered {
+    greeted: bool,
+  },
   Declined,
   /// Not answered (or no word from the phone): a notification went too.
   Missed(Vec<String>),
@@ -240,9 +249,15 @@ impl Rang {
          notification was sent instead.\n{}",
         lines.join("\n")
       ),
-      Rang::Answered => "The user answered: they are on a voice call with you in this thread \
-        now. What you say next is read aloud to them: short spoken sentences, no tables or \
-        code, starting with why you called."
+      Rang::Answered { greeted: true } => "The user answered: they are on a voice call with \
+        you in this thread now. What you say next is read aloud to them: short spoken \
+        sentences, no tables or code, starting with why you called."
+        .into(),
+      Rang::Answered { greeted: false } => "The user answered; their phone is still joining \
+        the call (a slow link). Their first words, \"(I picked up your call.)\", come as a \
+        message in this thread: your reply to that one is read aloud to them, short spoken \
+        sentences starting with why you called. Until it comes, say nothing to them: end this \
+        turn with one short line (not read aloud), or go on with other work."
         .into(),
       Rang::Declined => format!(
         "The user declined the call. No call goes from this node for the next {} minutes; if \
@@ -250,8 +265,10 @@ impl Rang {
         AFTER_DECLINE.as_secs() / 60
       ),
       Rang::Missed(lines) => format!(
-        "No answer: the phone rang and nobody picked up. A notification was sent instead, so \
-         it stays on the phone.\n{}",
+        "No answer: the phone rang and nobody picked up (or its answer did not reach this \
+         node in time). A notification was sent instead, so it stays on the phone. Should they \
+         pick up late, their words come as a message in this thread, and your reply to it is \
+         read aloud.\n{}",
         lines.join("\n")
       ),
     }
@@ -301,6 +318,11 @@ pub(crate) async fn ring(s: &Arc<Shared>, thread: Option<&RecordId>, reason: &st
       .flatten()
   });
   let thread_id = thread.as_ref().map(|t| t.to_string());
+  // The phone syncs this repository alone from here, answering.
+  let repo = thread
+    .as_ref()
+    .and_then(|t| s.thread_place(t).ok())
+    .map(|(root, _)| root.repo().to_string());
   let waiting = s.rings.wait_for(&call);
   let settings = crate::config::Config::load(&s.data)
     .ok()
@@ -315,6 +337,7 @@ pub(crate) async fn ring(s: &Arc<Shared>, thread: Option<&RecordId>, reason: &st
       &crate::apns::Ring {
         call: &call,
         thread: thread_id.as_deref(),
+        repo: repo.as_deref(),
         node: &here,
         caller: &caller,
         title: title.as_deref(),
@@ -335,7 +358,14 @@ pub(crate) async fn ring(s: &Arc<Shared>, thread: Option<&RecordId>, reason: &st
   let outcome = waiting.outcome(WAIT).await;
   eprintln!("call {call}: {outcome:?}");
   Ok(match outcome {
-    Some(Outcome::Answered) => Rang::Answered,
+    Some(Outcome::Answered) => {
+      let greeted = match &thread {
+        Some(t) => first_words(s, t, GREET).await,
+        None => false,
+      };
+      eprintln!("call {call}: the user's first words came: {greeted}");
+      Rang::Answered { greeted }
+    }
     Some(Outcome::Declined) => {
       s.rings.declined(Instant::now());
       Rang::Declined
@@ -344,6 +374,34 @@ pub(crate) async fn ring(s: &Arc<Shared>, thread: Option<&RecordId>, reason: &st
       Rang::Missed(instead(s.clone(), thread, "Missed call from Stitch", caller).await)
     }
   })
+}
+
+/// Waits (`within` at most) for something to be woven into `thread`'s
+/// running turn: a call's first words, which the phone sends once its
+/// voice call is on. Whether they came.
+async fn first_words(s: &Shared, thread: &RecordId, within: Duration) -> bool {
+  let Some(steer) = s
+    .detached
+    .steers
+    .lock()
+    .expect("steers lock")
+    .get(thread.as_str())
+    .cloned()
+  else {
+    return false;
+  };
+  let until = tokio::time::Instant::now() + within;
+  loop {
+    let arrival = steer.arrival();
+    tokio::pin!(arrival);
+    arrival.as_mut().enable();
+    if steer.has_queued() {
+      return true;
+    }
+    if tokio::time::timeout_at(until, arrival).await.is_err() {
+      return steer.has_queued();
+    }
+  }
 }
 
 /// A phone's word on a call: `Request::RingOutcome` on the phone's own
@@ -376,6 +434,13 @@ pub(crate) fn answer(s: &Shared, call: &str, outcome: &str) -> crate::api::Reply
       // A call that no longer waits (it timed out, the turn was stopped)
       // takes nothing: said, not an error.
       let waited = s.rings.deliver(call, o);
+      if !waited {
+        // Late: the tool said missed already. Answered, the phone's first
+        // words still reach the thread (an assignment: woven into a turn
+        // still running, else a turn of their own), and the reply to them
+        // is read aloud in the call.
+        eprintln!("call {call}: {outcome}, after the call stopped waiting");
+      }
       crate::api::Reply::Lines(vec![if waited {
         format!("call {call}: {outcome}")
       } else {
@@ -468,7 +533,13 @@ mod tests {
 
   #[test]
   fn each_outcome_tells_the_model_what_to_do() {
-    assert!(Rang::Answered.said().contains("read aloud"));
+    assert!(
+      Rang::Answered { greeted: true }
+        .said()
+        .contains("read aloud")
+    );
+    let joining = Rang::Answered { greeted: false }.said();
+    assert!(joining.contains("still joining") && joining.contains("picked up"));
     assert!(Rang::Declined.said().contains("30 minutes"));
     assert!(
       Rang::Missed(vec!["iphone: pushed".into()])

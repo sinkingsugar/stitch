@@ -95,7 +95,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// The version local clients and the node must agree on: the package's,
 /// and the local protocol's, bumped whenever `api` changes shape.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/local-75");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/local-76");
 
 /// The format of the store (records, segments, the index) this build
 /// writes: bumped by a migration an older build cannot read after
@@ -125,7 +125,7 @@ pub fn build() -> &'static str {
 /// same version but another shape misreads every message (an old
 /// browser-host retried for hours against a node with two new requests).
 #[cfg(test)]
-const API_SHAPE: &str = "4c4d251beeec170b";
+const API_SHAPE: &str = "293364f743a1a162";
 
 /// What `STORE_FORMAT` stands for: a hash of the code that reads and
 /// writes the store's files (the migrations, the record and segment

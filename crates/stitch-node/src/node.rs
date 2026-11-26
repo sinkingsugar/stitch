@@ -3955,6 +3955,37 @@ pub(crate) async fn sync_one(s: &Arc<Shared>, repo: &RepoId) -> Vec<String> {
   lines
 }
 
+/// Syncs `repo` with peer `peer` alone (`Request::SyncRepo`: a call
+/// answered, its thread from the node that rang, nothing else in front of
+/// it); a repository not held here yet is the whole sync with that peer,
+/// which holds it.
+pub(crate) async fn sync_repo_with(s: &Arc<Shared>, peer: &str, repo: &str) -> Vec<String> {
+  let held = repo
+    .parse::<RepoId>()
+    .ok()
+    .filter(|r| s.state().root(r).is_some());
+  let Some(repo) = held else {
+    return sync_all(s, Some(peer)).await;
+  };
+  let started = std::time::Instant::now();
+  let peers: Vec<_> = known_peers(s)
+    .await
+    .into_iter()
+    .filter(|p| p.name == peer || p.id == peer)
+    .collect();
+  if peers.is_empty() {
+    return vec![format!("no peer `{peer}`")];
+  }
+  let reports = sync_peers(s, &peers, std::slice::from_ref(&repo), true).await;
+  let mut tally = Tally::default();
+  let mut lines = Vec::new();
+  for (p, report) in peers.iter().zip(&reports) {
+    tally.add(p, report, &mut lines);
+  }
+  tally.log_if(s, &format!("sync {repo}"), started.elapsed(), true);
+  lines
+}
+
 /// How long a peer has to be reached for a sync: an offline one costs no
 /// more than this, once per sync.
 const SYNC_CONNECT: Duration = Duration::from_secs(10);
@@ -6460,6 +6491,7 @@ where
         return Ok(None);
       }
       Request::Sync { peer } => Ok(Reply::Synced(sync_all(s, peer.as_deref()).await)),
+      Request::SyncRepo { peer, repo } => Ok(Reply::Synced(sync_repo_with(s, &peer, &repo).await)),
       Request::ProjectFetch { repo } => {
         let repo: RepoId = repo.parse()?;
         Ok(Reply::Lines(vec![

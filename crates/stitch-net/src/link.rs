@@ -659,6 +659,39 @@ impl Net {
       .map_err(AskError::Failed)
   }
 
+  /// Asks a peer a question that may be asked twice (its answer only
+  /// notes a fact, as a call's outcome) and is answered at once: reaching
+  /// it takes at most `connect`; a kept connection that brings no answer
+  /// within `reply` is taken for dead (a phone back from suspension keeps
+  /// connections its peers already dropped) and the question is asked
+  /// again on a fresh one, as syncs are.
+  pub async fn ask_again_within(
+    &self,
+    peer: EndpointAddr,
+    question: Vec<u8>,
+    connect: Duration,
+    reply: Duration,
+  ) -> std::result::Result<Vec<u8>, AskError> {
+    self
+      .retrying(&peer, Some(connect), |link| {
+        let question = question.clone();
+        async move {
+          let (mut send, mut recv) = link.conn.open_bi().await.map_err(Error::net)?;
+          write_frame(&mut send, &Frame::Ask(question)).await?;
+          send.finish().map_err(Error::net)?;
+          match tokio::time::timeout(reply, read_frame(&mut recv))
+            .await
+            .map_err(|_| Error::Stale)??
+          {
+            Frame::Answer(bytes) => Ok(bytes),
+            Frame::Refused { reason } => Err(Error::Refused(reason)),
+            f => Err(unexpected(&f, "Answer")),
+          }
+        }
+      })
+      .await
+  }
+
   /// A question is never asked twice (its answer may run a tool): a kept
   /// connection found dead before it was asked is dialed afresh, one that
   /// dies after is the error.

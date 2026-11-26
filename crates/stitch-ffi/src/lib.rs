@@ -2099,6 +2099,16 @@ impl Stitch {
     }
   }
 
+  /// Syncs one repository with one peer now (a call answered: the thread
+  /// that rang, from the node that rang, its repository in the call's
+  /// push); one not held here yet is the whole sync with that peer.
+  pub async fn sync_repo(&self, peer: String, repo: String) -> Result<Vec<String>> {
+    match self.request(Request::SyncRepo { peer, repo }).await? {
+      Reply::Synced(lines) => Ok(lines),
+      other => Err(StitchError::of(format!("unexpected reply: {other:?}"))),
+    }
+  }
+
   /// Syncs with every peer now: a line per peer and repository.
   pub async fn sync(&self) -> Result<Vec<String>> {
     match self.request(Request::Sync { peer: None }).await? {

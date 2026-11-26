@@ -970,6 +970,13 @@ pub enum Request {
     bundle: Vec<u8>,
     preview: bool,
   },
+  /// Syncs one repository with one peer now (a call answered: the thread
+  /// that rang, from the node that rang, before anything else); one not
+  /// held here is the whole sync with that peer. `Reply::Synced`.
+  SyncRepo {
+    peer: String,
+    repo: String,
+  },
 }
 
 /// An event's question (docs/events.md §3): answered by a thread's
@@ -1786,6 +1793,10 @@ mod wire_tests {
         node: s("mac"),
         call: s("c"),
         outcome: s("answered"),
+      },
+      SyncRepo {
+        peer: s("mac"),
+        repo: s("p-1"),
       },
       ApnsTest,
       Notify {
