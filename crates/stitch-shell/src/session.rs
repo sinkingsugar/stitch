@@ -540,7 +540,8 @@ fn echoed(lines: &[&str], sent: &[Sent]) -> Vec<bool> {
       }
       let long = joined.chars().count() >= ECHO_LONG;
       // Still being drawn: the screen read while the terminal echoes the
-      // text, its start alone on the last line.
+      // text (the kernel's echo comes a byte at a time), its start alone
+      // on the last line.
       let drawing = first && i == lines.len() && whole.starts_with(joined.as_str());
       if run.is_empty() || !(joined == whole || drawing || long && (first || run.len() > 1)) {
         break 'block;
@@ -1053,6 +1054,8 @@ impl Session {
     // not upgrade (`Arc::new_cyclic`), which would read as the session
     // dropped, and the shell's first output would end the reader.
     let (start, built) = tokio::sync::oneshot::channel::<()>();
+    #[cfg(test)]
+    let pace = tests::READ_PACE.get();
     let inner = Arc::new_cyclic(|weak: &std::sync::Weak<Inner>| {
       let weak = weak.clone();
       let task = tokio::spawn(async move {
@@ -1063,7 +1066,12 @@ impl Session {
         loop {
           // EOF or EIO (the slave side closed) end the session; another
           // read error does too, and is said.
-          let (n, why) = match reader.read(&mut buf).await {
+          #[cfg(not(test))]
+          let want = buf.len();
+          // Paced: a byte a read, as a terminal's echo may come.
+          #[cfg(test)]
+          let want = if pace.is_zero() { buf.len() } else { 1 };
+          let (n, why) = match reader.read(&mut buf[..want]).await {
             Ok(0) => (0, "its output ended".to_owned()),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => {
@@ -1072,6 +1080,10 @@ impl Session {
             Err(e) => (0, format!("reading its terminal failed: {e}")),
             Ok(n) => (n, String::new()),
           };
+          #[cfg(test)]
+          if !pace.is_zero() {
+            tokio::time::sleep(pace).await;
+          }
           let Some(inner) = weak.upgrade() else { return };
           if n == 0 {
             {
@@ -2096,6 +2108,45 @@ mod tests {
     /// this thread: room for the reader to run first.
     pub(super) static BUILD_DELAY: std::cell::Cell<Duration> =
       const { std::cell::Cell::new(Duration::ZERO) };
+    /// Non-zero: a session built on this thread reads its terminal a byte
+    /// at a time, this long apart, so every stretch of its output is on
+    /// the screen a while.
+    pub(super) static READ_PACE: std::cell::Cell<Duration> =
+      const { std::cell::Cell::new(Duration::ZERO) };
+  }
+
+  /// The terminal echoes typed input byte by byte (bash `--noediting`: the
+  /// kernel's line discipline writes each echoed byte to the pty on its
+  /// own), so a read can end mid-echo (`$ sleep 1; echo READY-2`): the
+  /// screen as it is then shows no news, the word in the echo matched.
+  #[tokio::test(flavor = "multi_thread")]
+  async fn a_screen_match_is_not_the_echo_read_mid_way() {
+    READ_PACE.set(Duration::from_millis(5));
+    let s = Session::spawn(Config::new(std::env::temp_dir())).await;
+    READ_PACE.set(Duration::ZERO);
+    let s = s.unwrap();
+    s.run("echo READY-1", Wait::prompt(Duration::from_secs(10)))
+      .await
+      .unwrap();
+    let started = Instant::now();
+    let o = s
+      .run(
+        "sleep 1; echo READY-2; sleep 30",
+        Wait {
+          timeout: Duration::from_secs(10),
+          idle: None,
+          screen: Some(regex::Regex::new("READY-\\d").unwrap()),
+        },
+      )
+      .await
+      .unwrap();
+    assert!(
+      started.elapsed() >= Duration::from_millis(900),
+      "fired on the echo: {:?}",
+      s.quiet_view().0
+    );
+    assert!(o.output.ends_with("READY-2"), "{:?}", o.output);
+    s.close().await;
   }
 
   /// The shell's first output read while the session is still being
