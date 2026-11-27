@@ -33,8 +33,8 @@ export function ScopePicker({ scopes, onToggle }: { scopes: StagedScope[]; onTog
   useEffect(() => {
     if (!open) return;
     setTimeout(() => box.current?.focus(), 0);
-    // The whole forest when the map has it; reading it is one request.
-    if (!M.loaded.peek()) void M.load();
+    // The whole forest, up to date: hidden, the map only notes it went stale (one request to read it again).
+    M.fresh();
   }, [open]);
   const on = (s: StagedScope) => scopes.some((x) => x.kind === s.kind && x.id === s.id);
   const pasted = parseScope(q);

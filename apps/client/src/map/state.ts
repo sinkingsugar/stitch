@@ -108,6 +108,12 @@ export const load = coalesced(async () => {
 /** The map is on screen: read the forest when it was never read or went stale. */
 export function shown() {
   mounted.value = true;
+  fresh();
+}
+
+/** The model is about to be read off the map (the composer's ⎇ picker): bring it up to date, as `shown` does — read
+ * the forest when it was never read or went stale, else lay out the deltas that came while the map was hidden. */
+export function fresh() {
   if (!loaded.value || stale) void load();
   else if (unshown) {
     unshown = false;
