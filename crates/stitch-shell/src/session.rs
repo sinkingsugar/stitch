@@ -539,7 +539,10 @@ fn echoed(lines: &[&str], sent: &[Sent]) -> Vec<bool> {
         break;
       }
       let long = joined.chars().count() >= ECHO_LONG;
-      if run.is_empty() || !(joined == whole || long && (first || run.len() > 1)) {
+      // Still being drawn: the screen read while the terminal echoes the
+      // text, its start alone on the last line.
+      let drawing = first && i == lines.len() && whole.starts_with(joined.as_str());
+      if run.is_empty() || !(joined == whole || drawing || long && (first || run.len() > 1)) {
         break 'block;
       }
       for &r in &run {
@@ -2120,6 +2123,27 @@ mod tests {
     );
     let exited = std::process::ExitStatus::from_raw(1 << 8);
     assert_eq!(exit_text(exited), "the shell exited with status 1");
+  }
+
+  #[test]
+  fn a_partly_drawn_echo_is_no_news() {
+    // The screen read mid-echo: `READY-2` is in what is drawn so far.
+    let sent = vec![Sent {
+      text: "sleep 1; echo READY-2; sleep 30\r".into(),
+      above: vec!["READY-1".into()],
+      at: "$".into(),
+    }];
+    let screen = ["READY-1", "$ sleep 1; echo READY-2"];
+    assert_eq!(echoed(&screen, &sent), [false, true]);
+    let re = regex::Regex::new("READY-\\d").unwrap();
+    let news = News {
+      sent: sent.clone(),
+      before: "READY-1\n$".into(),
+    };
+    assert!(news.matches(&re, &screen.join("\n")).is_empty());
+    // The output after the whole echo is news.
+    let screen = ["READY-1", "$ sleep 1; echo READY-2; sleep 30", "READY-2"];
+    assert_eq!(echoed(&screen, &sent), [false, true, false]);
   }
 
   #[test]
