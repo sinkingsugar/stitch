@@ -212,9 +212,9 @@ fn a_compacted_chat_reads_as_one_conversation_in_the_app() {
   assert_eq!(threads[0].earlier, vec![old.clone()]);
 
   // Whatever the app kept, it opens the newest.
-  assert_eq!(stitch.newest(old.clone()), new);
-  assert_eq!(stitch.newest(new.clone()), new);
-  assert_eq!(stitch.newest("not-an-id".into()), "not-an-id");
+  assert_eq!(wait(stitch.clone().newest(old.clone())), new);
+  assert_eq!(wait(stitch.clone().newest(new.clone())), new);
+  assert_eq!(wait(stitch.clone().newest("not-an-id".into())), "not-an-id");
 
   // The transcript over the chain: the old thread's, the divider with its
   // compaction, the new one's; the old messages with no IDs.

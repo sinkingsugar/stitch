@@ -80,22 +80,35 @@ pub struct Device {
 
 /// The phones, as their latest `device` records say: one per node.
 pub fn devices(index: &Index) -> Vec<Device> {
-  let mut out: Vec<Device> = Vec::new();
-  for r in index.records(Some(DEVICE)).unwrap_or_default() {
+  latest_records(index).into_iter().map(|(d, _)| d).collect()
+}
+
+/// Each node's latest `device` record, with when it was written. The
+/// latest is by when it was created, then, between records of the same
+/// instant (two nodes' clocks), by the larger ID: the same one on every
+/// node, whatever order it read them in.
+fn latest_records(index: &Index) -> Vec<(Device, jiff::Timestamp)> {
+  let mut records = index.records(Some(DEVICE)).unwrap_or_default();
+  records.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
+  let mut out: Vec<(Device, jiff::Timestamp)> = Vec::new();
+  for r in records {
     let s = |k: &str| r.fields.get(k).and_then(Value::as_str).map(str::to_owned);
     let (token, voip) = (s("token"), s("voip"));
     if token.is_none() && voip.is_none() {
       continue;
     }
     // Oldest first: a later record of a node replaces its earlier.
-    out.retain(|d| d.node != r.node);
-    out.push(Device {
-      node: r.node.clone(),
-      token,
-      env: s("env").unwrap_or_else(|| "production".into()),
-      key: s("key"),
-      voip,
-    });
+    out.retain(|(d, _)| d.node != r.node);
+    out.push((
+      Device {
+        node: r.node.clone(),
+        token,
+        env: s("env").unwrap_or_else(|| "production".into()),
+        key: s("key"),
+        voip,
+      },
+      r.created,
+    ));
   }
   out
 }
@@ -111,7 +124,7 @@ fn hex_token(token: &str) -> Result<String> {
 
 /// Writes this phone's registration, unless its latest record already
 /// says it; whether it wrote one. Its PushKit token (`register_voip`) is
-/// kept.
+/// kept when the latest record is the same build's (`write`).
 pub fn register(
   home: &RecordRoot,
   index: &Mutex<Index>,
@@ -120,9 +133,7 @@ pub fn register(
   env: &str,
   key: &str,
 ) -> Result<bool> {
-  let token = hex_token(token)?;
-  let voip = latest(index, node).and_then(|d| d.voip);
-  write(home, index, node, Some(token), env, key, voip)
+  write(home, index, node, Token::Push(hex_token(token)?), env, key)
 }
 
 /// Writes this phone's PushKit token (the app's `PKPushRegistry`, for
@@ -137,26 +148,35 @@ pub fn register_voip(
   env: &str,
   key: &str,
 ) -> Result<bool> {
-  let voip = hex_token(voip)?;
-  let token = latest(index, node).and_then(|d| d.token);
-  write(home, index, node, token, env, key, Some(voip))
+  write(home, index, node, Token::Voip(hex_token(voip)?), env, key)
 }
 
-/// This node's latest registration.
-fn latest(index: &Mutex<Index>, node: &NodeName) -> Option<Device> {
-  devices(&index.lock().expect("index lock"))
-    .into_iter()
-    .find(|d| d.node == node.as_str())
+/// The token a registration brings.
+enum Token {
+  Push(String),
+  Voip(String),
 }
 
+/// Writes the registration `token` makes: the other token kept from the
+/// latest record when that is the same build's (the same environment and
+/// key), else left out. A development and a release build on one phone
+/// are one node, each registering at launch: a token carried over to the
+/// other's record would be pushed to in the wrong environment, which APNs
+/// drops without a word, or sealed for a key that build does not hold, so
+/// it arrives and cannot be opened.
+///
+/// The latest record is read, and the next written and indexed, under the
+/// index lock: the push and the call token register at once at launch,
+/// and each would otherwise keep the other's old value. The record is
+/// written after the latest, by a millisecond when the clock has not moved
+/// on, so the one written last is the latest.
 fn write(
   home: &RecordRoot,
   index: &Mutex<Index>,
   node: &NodeName,
-  token: Option<String>,
+  new: Token,
   env: &str,
   key: &str,
-  voip: Option<String>,
 ) -> Result<bool> {
   if env != "sandbox" && env != "production" {
     return Err(Error::Config(
@@ -168,6 +188,18 @@ fn write(
       "a push key is an X25519 public key, base64".into(),
     ));
   }
+  let mut index = index.lock().expect("index lock");
+  let latest = latest_records(&index)
+    .into_iter()
+    .find(|(d, _)| d.node == node.as_str());
+  let same = latest
+    .as_ref()
+    .map(|(d, _)| d)
+    .filter(|d| d.env == env && d.key.as_deref() == Some(key));
+  let (token, voip) = match new {
+    Token::Push(t) => (Some(t), same.and_then(|d| d.voip.clone())),
+    Token::Voip(v) => (same.and_then(|d| d.token.clone()), Some(v)),
+  };
   let device = Device {
     node: node.to_string(),
     token,
@@ -175,7 +207,7 @@ fn write(
     key: Some(key.to_owned()),
     voip,
   };
-  if latest(index, node).as_ref() == Some(&device) {
+  if latest.as_ref().map(|(d, _)| d) == Some(&device) {
     return Ok(false);
   }
   let mut draft = Draft::new(DEVICE, Author::node(node.clone()))?;
@@ -186,9 +218,23 @@ fn write(
   if let Some(v) = &device.voip {
     draft = draft.field("voip", v.as_str())?;
   }
-  home.publish(node, draft)?;
-  index.lock().expect("index lock").refresh(home)?;
+  let at = after(latest.map(|(_, then)| then), jiff::Timestamp::now())?;
+  home.publish_at(node, draft, at)?;
+  index.refresh(home)?;
   Ok(true)
+}
+
+/// When a registration is written: `now`, to the millisecond (what a
+/// record keeps), or a millisecond after the latest when the clock has not
+/// moved past it, so the record written last is the latest.
+fn after(latest: Option<jiff::Timestamp>, now: jiff::Timestamp) -> Result<jiff::Timestamp> {
+  let now = now.as_millisecond();
+  let ms = match latest.map(|t| t.as_millisecond()) {
+    Some(then) if then >= now => then.checked_add(1),
+    _ => Some(now),
+  };
+  ms.and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
+    .ok_or_else(|| Error::Config("no time after the latest registration".into()))
 }
 
 /// Seals `content` for the phone whose X25519 public key is `key`
@@ -976,6 +1022,186 @@ mod tests {
       (d.token.as_deref(), d.voip.as_deref()),
       (None, Some("beef"))
     );
+  }
+
+  fn phone_home() -> (tempfile::TempDir, RecordRoot, Mutex<Index>) {
+    let dir = tempfile::tempdir().unwrap();
+    let home = RecordRoot::init(
+      dir.path(),
+      "home".parse().unwrap(),
+      stitch_store::Role::Home,
+    )
+    .unwrap();
+    let index = Mutex::new(Index::open(&dir.path().join("index.sqlite")).unwrap());
+    (dir, home, index)
+  }
+
+  #[test]
+  fn two_builds_on_one_phone_never_mix_their_tokens() {
+    // A development build (sandbox) and a release build (production) of
+    // the app on one phone register as the same node, each at launch. A
+    // token is good only in its own environment, for its own key: one
+    // carried over to the other build's record is pushed to in the wrong
+    // environment, and APNs drops it without a word.
+    let (_dir, home, index) = phone_home();
+    let phone: NodeName = "iphone".parse().unwrap();
+    let (dev, rel) = (B64.encode([1u8; 32]), B64.encode([2u8; 32]));
+    let latest = || devices(&index.lock().unwrap())[0].clone();
+    assert!(register(&home, &index, &phone, "d0d0", "sandbox", &dev).unwrap());
+    assert!(register_voip(&home, &index, &phone, "d1d1", "sandbox", &dev).unwrap());
+    // The release build: its call token alone, not the development token.
+    assert!(register_voip(&home, &index, &phone, "e1e1", "production", &rel).unwrap());
+    let d = latest();
+    assert_eq!(
+      (d.env.as_str(), d.token.as_deref(), d.voip.as_deref()),
+      ("production", None, Some("e1e1"))
+    );
+    assert!(register(&home, &index, &phone, "e0e0", "production", &rel).unwrap());
+    let d = latest();
+    assert_eq!(
+      (d.env.as_str(), d.token.as_deref(), d.voip.as_deref()),
+      ("production", Some("e0e0"), Some("e1e1"))
+    );
+    // Back to the development build: its push token alone.
+    assert!(register(&home, &index, &phone, "d0d0", "sandbox", &dev).unwrap());
+    let d = latest();
+    assert_eq!(
+      (d.env.as_str(), d.token.as_deref(), d.voip.as_deref()),
+      ("sandbox", Some("d0d0"), None)
+    );
+    // Same environment, another key (another install): nothing carried.
+    let other = B64.encode([3u8; 32]);
+    assert!(register_voip(&home, &index, &phone, "f1f1", "sandbox", &other).unwrap());
+    let d = latest();
+    assert_eq!(
+      (d.token.as_deref(), d.voip.as_deref()),
+      (None, Some("f1f1"))
+    );
+  }
+
+  #[test]
+  fn another_environment_with_the_same_key_carries_nothing() {
+    let (_dir, home, index) = phone_home();
+    let phone: NodeName = "iphone".parse().unwrap();
+    let key = B64.encode([1u8; 32]);
+    assert!(register(&home, &index, &phone, "d0d0", "sandbox", &key).unwrap());
+    assert!(register_voip(&home, &index, &phone, "e1e1", "production", &key).unwrap());
+    let d = devices(&index.lock().unwrap())[0].clone();
+    assert_eq!(
+      (d.env.as_str(), d.token.as_deref(), d.voip.as_deref()),
+      ("production", None, Some("e1e1"))
+    );
+  }
+
+  #[test]
+  fn a_registration_is_written_after_the_latest_to_the_millisecond() {
+    let t = |s: &str| s.parse::<jiff::Timestamp>().unwrap();
+    // The clock within the latest's millisecond: the next one.
+    assert_eq!(
+      after(
+        Some(t("2026-11-27T12:00:00.123Z")),
+        t("2026-11-27T12:00:00.1235Z")
+      )
+      .unwrap(),
+      t("2026-11-27T12:00:00.124Z")
+    );
+    // Behind it (a clock set back): after it all the same.
+    assert_eq!(
+      after(Some(t("2026-11-27T12:00:01Z")), t("2026-11-27T12:00:00.5Z")).unwrap(),
+      t("2026-11-27T12:00:01.001Z")
+    );
+    // Moved on: now, to the millisecond.
+    assert_eq!(
+      after(
+        Some(t("2026-11-27T12:00:00.123Z")),
+        t("2026-11-27T12:00:00.2047Z")
+      )
+      .unwrap(),
+      t("2026-11-27T12:00:00.204Z")
+    );
+    assert_eq!(
+      after(None, t("2026-11-27T12:00:00.2047Z")).unwrap(),
+      t("2026-11-27T12:00:00.204Z")
+    );
+  }
+
+  #[test]
+  fn the_registration_written_last_is_the_one_used() {
+    // The push token and the call token register together at launch,
+    // within a millisecond: the record written last must be the latest,
+    // not whichever of two same-instant records has the larger random ID.
+    let (_dir, home, index) = phone_home();
+    let phone: NodeName = "iphone".parse().unwrap();
+    let key = B64.encode([1u8; 32]);
+    for i in 0..40u32 {
+      let token = format!("{:04x}", 2 * i);
+      let voip = format!("{:04x}", 2 * i + 1);
+      register(&home, &index, &phone, &token, "sandbox", &key).unwrap();
+      register_voip(&home, &index, &phone, &voip, "sandbox", &key).unwrap();
+      let d = devices(&index.lock().unwrap())[0].clone();
+      assert_eq!(
+        (d.token.as_deref(), d.voip.as_deref()),
+        (Some(token.as_str()), Some(voip.as_str())),
+        "round {i}"
+      );
+    }
+  }
+
+  #[test]
+  fn a_tie_goes_to_the_larger_record_id() {
+    // Two nodes' clocks can give two records the same instant: every node
+    // must pick the same one, whatever order it read them in.
+    let (_dir, home, index) = phone_home();
+    let phone: NodeName = "iphone".parse().unwrap();
+    let at = jiff::Timestamp::now();
+    let mut ids = Vec::new();
+    for token in ["aaaa", "bbbb", "cccc"] {
+      let draft = Draft::new(DEVICE, Author::node(phone.clone()))
+        .unwrap()
+        .field("token", token)
+        .unwrap()
+        .field("env", "sandbox")
+        .unwrap();
+      let r = home.publish_at(&phone, draft, at).unwrap();
+      ids.push((r.id.to_string(), token));
+    }
+    index.lock().unwrap().refresh(&home).unwrap();
+    let (_, want) = ids.iter().max().unwrap();
+    assert_eq!(
+      devices(&index.lock().unwrap())[0].token.as_deref(),
+      Some(*want)
+    );
+  }
+
+  #[test]
+  fn tokens_registered_at_once_are_both_kept() {
+    // Each registration reads the latest record and writes the next one
+    // with the other token kept: two at once must not each keep the
+    // other's old value.
+    let (_dir, home, index) = phone_home();
+    let phone: NodeName = "iphone".parse().unwrap();
+    let key = B64.encode([1u8; 32]);
+    for i in 0..20u32 {
+      let token = format!("{:04x}", 2 * i);
+      let voip = format!("{:04x}", 2 * i + 1);
+      let go = std::sync::Barrier::new(2);
+      std::thread::scope(|s| {
+        s.spawn(|| {
+          go.wait();
+          register(&home, &index, &phone, &token, "sandbox", &key).unwrap();
+        });
+        s.spawn(|| {
+          go.wait();
+          register_voip(&home, &index, &phone, &voip, "sandbox", &key).unwrap();
+        });
+      });
+      let d = devices(&index.lock().unwrap())[0].clone();
+      assert_eq!(
+        (d.token.as_deref(), d.voip.as_deref()),
+        (Some(token.as_str()), Some(voip.as_str())),
+        "round {i}"
+      );
+    }
   }
 
   #[test]

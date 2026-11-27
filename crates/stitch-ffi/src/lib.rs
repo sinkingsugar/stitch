@@ -199,6 +199,43 @@ pub struct SpeakerInfo {
   pub model: Option<String>,
 }
 
+/// What the thread list reads of one row from the index, copied out under
+/// the lock (`threads_now`).
+struct RowFacts {
+  origin: Option<stitch_node::share::Origin>,
+  title: Option<String>,
+  pinned: bool,
+  state: Option<String>,
+  read_only: bool,
+  /// The thread it was spawned from, followed to the conversation it goes
+  /// on in (the list has that one).
+  parent: Option<RecordId>,
+  /// Its compaction chain, itself included.
+  lineage: Vec<RecordId>,
+  room_mode: Option<String>,
+  participants: Vec<ParticipantInfo>,
+}
+
+impl RowFacts {
+  fn read(index: &Index, r: &stitch_store::IndexedRecord, room: bool) -> RowFacts {
+    RowFacts {
+      origin: stitch_node::share::origin(index, &r.id),
+      title: index.lineage_title(&r.id),
+      pinned: index.lineage_pinned(&r.id),
+      state: stitch_node::chat::detached_state(index, r).ok().flatten(),
+      read_only: stitch_node::meta::read_only(index, &r.id),
+      parent: stitch_node::meta::parent(index, &r.id).map(|p| index.compaction_newest(&p)),
+      lineage: index.compaction_lineage(&r.id),
+      room_mode: room.then(|| stitch_node::rooms::policy(index, &r.id).mode),
+      participants: if room {
+        participants_of(index, &r.id)
+      } else {
+        Vec::new()
+      },
+    }
+  }
+}
+
 fn participants_of(index: &Index, room: &RecordId) -> Vec<ParticipantInfo> {
   stitch_node::rooms::roster(index, room)
     .into_iter()
@@ -1925,34 +1962,44 @@ impl Stitch {
   /// `thread` itself when it was never compacted, or is not an ID. What
   /// the app opens for an ID it was given (a link, a notification, a
   /// report, what it kept).
-  pub fn newest(&self, thread: String) -> String {
+  /// Async: it reads the index, which the thread list may hold.
+  pub async fn newest(self: Arc<Self>, thread: String) -> String {
     let Ok(id) = thread.parse::<RecordId>() else {
       return thread;
     };
-    let index = self.index.lock().expect("index lock");
-    index.compaction_newest(&id).to_string()
+    self
+      .blocking(move |s| {
+        let index = s.index.lock().expect("index lock");
+        index.compaction_newest(&id).to_string()
+      })
+      .await
+      .unwrap_or(thread)
   }
 
   /// The node a thread was set to run on (`run_on`), when it is one;
   /// `None`: it runs where it is typed into.
-  pub fn runs_on(&self, thread: String) -> Result<Option<String>> {
+  pub async fn runs_on(self: Arc<Self>, thread: String) -> Result<Option<String>> {
     let id: RecordId = thread.parse().map_err(StitchError::of)?;
-    let index = self.index.lock().expect("index lock");
-    Ok(stitch_node::meta::runs_on(&index, &id))
+    self
+      .blocking(move |s| {
+        let index = s.index.lock().expect("index lock");
+        stitch_node::meta::runs_on(&index, &id)
+      })
+      .await
   }
 
   /// The node that owns a thread nobody chose a node for, when it is
   /// another than this one: where what is typed here runs by default
   /// (design §2.7, "Continue on another node"), when it runs programs.
   /// `None`: it is pinned (`runs_on`), or this node's own.
-  pub fn owner_elsewhere(&self, thread: String) -> Result<Option<String>> {
+  pub async fn owner_elsewhere(self: Arc<Self>, thread: String) -> Result<Option<String>> {
     let id: RecordId = thread.parse().map_err(StitchError::of)?;
-    let index = self.index.lock().expect("index lock");
-    Ok(stitch_node::meta::owner_elsewhere(
-      &index,
-      &id,
-      &self.node_name(),
-    ))
+    self
+      .blocking(move |s| {
+        let index = s.index.lock().expect("index lock");
+        stitch_node::meta::owner_elsewhere(&index, &id, &s.node_name())
+      })
+      .await
   }
 
   /// Whether this device can run programs (shells): a phone cannot, so it
@@ -1963,10 +2010,14 @@ impl Stitch {
 
   /// Whether a thread is read-only (the user's last switch, else as it
   /// was created).
-  pub fn thread_read_only(&self, thread: String) -> Result<bool> {
+  pub async fn thread_read_only(self: Arc<Self>, thread: String) -> Result<bool> {
     let id: RecordId = thread.parse().map_err(StitchError::of)?;
-    let index = self.index.lock().expect("index lock");
-    Ok(stitch_node::meta::read_only(&index, &id))
+    self
+      .blocking(move |s| {
+        let index = s.index.lock().expect("index lock");
+        stitch_node::meta::read_only(&index, &id)
+      })
+      .await
   }
 
   /// Switches a thread to read-only (`on`), or writable, on every node:
@@ -3223,59 +3274,65 @@ impl Stitch {
     seen.revision
   }
 
+  /// The thread list. The index lock is held to list the rows, then
+  /// again for each row's facts, one row at a time, never for the whole
+  /// build: the app's other reads (`newest`, `runs_on`, a transcript)
+  /// take the same lock, and waited behind a list of hundreds of rows.
   fn threads_now(&self) -> Result<Vec<ThreadInfo>> {
-    let index = self.index.lock().expect("index lock");
-    let roots = roots(&index);
-    let home = roots
-      .iter()
-      .find(|r| r.config().role == Role::Home)
-      .map(|r| r.repo().clone());
-    let places = place::Places::load(&index);
-    // A compaction chain is one row, its newest thread, with the chain's
-    // title and pin (design §2.15, "One conversation").
-    let threads = index.listed_threads().map_err(StitchError::of)?;
+    let (threads, home, places) = {
+      let index = self.index.lock().expect("index lock");
+      let roots = roots(&index);
+      let home = roots
+        .iter()
+        .find(|r| r.config().role == Role::Home)
+        .map(|r| r.repo().clone());
+      let places = place::Places::load(&index);
+      // A compaction chain is one row, its newest thread, with the chain's
+      // title and pin (design §2.15, "One conversation").
+      let threads = index.listed_threads().map_err(StitchError::of)?;
+      (threads, home, places)
+    };
+    let listed = place::listed(threads, home.as_ref(), &Place::Global, true, &places);
     Ok(
-      place::listed(threads, home.as_ref(), &Place::Global, true, &places)
+      listed
         .into_iter()
         .map(|(r, at, p)| {
-          let origin = stitch_node::share::origin(&index, &r.id);
+          let room = r.fields.get("room") == Some(&serde_json::Value::Bool(true));
+          let facts = {
+            let index = self.index.lock().expect("index lock");
+            RowFacts::read(&index, &r, room)
+          };
+          let origin = facts.origin;
           ThreadInfo {
             imported_from: origin.as_ref().map(|o| o.from.clone()),
             imported_source: origin.as_ref().map(|o| o.source.clone()),
             imported_signed: origin.as_ref().is_some_and(|o| o.signed),
             imported_own: origin.as_ref().is_some_and(|o| o.own),
-            title: index
-              .lineage_title(&r.id)
-              .unwrap_or_else(|| "(untitled)".into()),
+            title: facts.title.unwrap_or_else(|| "(untitled)".into()),
             at: at.as_second(),
-            pinned: index.lineage_pinned(&r.id),
-            state: stitch_node::chat::detached_state(&index, &r).ok().flatten(),
+            pinned: facts.pinned,
+            state: facts.state,
             place: (p != Place::Global).then(|| p.label(self.name.as_str(), &places)),
             place_key: (p != Place::Global).then(|| p.key()),
-            read_only: stitch_node::meta::read_only(&index, &r.id),
-            // Spawned from a thread compacted since: under the conversation
-            // it goes on in, which the list has.
-            parent: stitch_node::meta::parent(&index, &r.id)
-              .map(|p| index.compaction_newest(&p).to_string()),
-            earlier: {
-              let mut chain = index.compaction_lineage(&r.id);
-              chain.retain(|t| t != &r.id);
-              chain.into_iter().map(|t| t.to_string()).collect()
-            },
+            read_only: facts.read_only,
+            parent: facts.parent.map(|p| p.to_string()),
+            // The chain before it: a compaction since the list was read
+            // may have added one after it, which is not earlier.
+            earlier: facts
+              .lineage
+              .into_iter()
+              .take_while(|t| t != &r.id)
+              .map(|t| t.to_string())
+              .collect(),
             goal: r
               .fields
               .get("goal")
               .and_then(|v| v.as_str())
               .and_then(|g| g.trim().lines().next())
               .map(|g| g.chars().take(200).collect()),
-            room: r.fields.get("room") == Some(&serde_json::Value::Bool(true)),
-            room_mode: (r.fields.get("room") == Some(&serde_json::Value::Bool(true)))
-              .then(|| stitch_node::rooms::policy(&index, &r.id).mode),
-            participants: if r.fields.get("room") == Some(&serde_json::Value::Bool(true)) {
-              participants_of(&index, &r.id)
-            } else {
-              Vec::new()
-            },
+            room,
+            room_mode: facts.room_mode,
+            participants: facts.participants,
             id: r.id.to_string(),
           }
         })
