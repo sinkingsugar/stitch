@@ -1275,3 +1275,80 @@ async fn a_thread_is_told_once_after_a_restart_what_its_shells_ran_was_cut() {
   c.request(&Request::Stop).await.unwrap();
   node.wait().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chats_turn_is_cancelled_from_another_client() {
+  // The web app's Cancel: a `Cancel` of the thread on another connection
+  // than the chat's own, while its turn runs a command.
+  let dir = tempfile::tempdir().unwrap();
+  let d = std::fs::canonicalize(dir.path()).unwrap();
+  let (base, sent) = model(vec![(
+    "CANCEL-ME",
+    vec![
+      tool_call("k1", "shell_run", run("sleep 30")),
+      answer("Should not be asked."),
+    ],
+  )])
+  .await;
+  let data = d.join("data");
+  setup(&data, &d.join("home"), &base, true);
+  let node = stitch_node::start(&data).await.unwrap();
+  let mut c = Client::connect(&data).await.unwrap();
+  let chat = Request::Chat {
+    thread: None,
+    text: "CANCEL-ME: run it".into(),
+    attachments: vec![],
+    model: None,
+    repo: None,
+    cwd: None,
+    global: false,
+    env: Vec::new(),
+    tools: Vec::new(),
+    skills: Vec::new(),
+    place: None,
+    memory: None,
+    end_user: None,
+    node: None,
+    spoken: false,
+    scopes: Vec::new(),
+  };
+  let thread: Arc<Mutex<Option<String>>> = Arc::default();
+  let cancelled: Arc<Mutex<Option<String>>> = Arc::default();
+  let began = std::time::Instant::now();
+  let done = c
+    .chat_with(&chat, None, |r| {
+      match r {
+        Reply::Thread(t) => *thread.lock().unwrap() = Some(t.clone()),
+        Reply::ToolCall(call) if call.contains("sleep 30") => {
+          let (t, data, out) = (
+            thread.lock().unwrap().clone().unwrap(),
+            data.clone(),
+            cancelled.clone(),
+          );
+          tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut other = Client::connect(&data).await.unwrap();
+            let r = other.request(&Request::Cancel { thread: t }).await;
+            *out.lock().unwrap() = Some(format!("{r:?}"));
+          });
+        }
+        _ => {}
+      }
+      None
+    })
+    .await
+    .unwrap();
+  let Reply::ChatDone { stop, .. } = done else {
+    panic!("{done:?}")
+  };
+  assert_eq!(cancelled.lock().unwrap().as_deref(), Some("Ok(Ok)"));
+  assert!(
+    began.elapsed() < Duration::from_secs(20),
+    "{:?}",
+    began.elapsed()
+  );
+  assert_eq!(stop, "interrupted");
+  assert_eq!(requests_of(&sent, "CANCEL-ME").len(), 1);
+  c.request(&Request::Stop).await.unwrap();
+  node.wait().await.unwrap();
+}

@@ -1872,6 +1872,27 @@ async fn event_loop(mut store: Store, default_model: String) -> Result<()> {
               let _ = c.send(Request::Interrupt);
             }
           }
+          Action::Cancel(thread) => {
+            // A message of ours waiting behind that turn comes back unsent.
+            if let Some(c) = &to_chat {
+              let _ = c.send(Request::Interrupt);
+            }
+            let (tx, data, exe) = (tx.clone(), store.data.clone(), exe.clone());
+            tokio::spawn(async move {
+              let r = async {
+                Client::connect_or_start(&data, &exe)
+                  .await?
+                  .request(&Request::Cancel { thread })
+                  .await
+              }
+              .await;
+              let said = match r {
+                Ok(_) => "[stopped the turn running on this thread]".to_owned(),
+                Err(e) => format!("[could not stop it: {e}]"),
+              };
+              let _ = tx.send(UiEvent::Notice(said));
+            });
+          }
           Action::Jobs => ask_jobs(&tx, &store, &exe),
           Action::StopJob(id) => {
             let (tx, data, exe) = (tx.clone(), store.data.clone(), exe.clone());

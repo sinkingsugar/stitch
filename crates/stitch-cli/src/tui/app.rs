@@ -909,6 +909,9 @@ pub enum Action {
   Retract(u64),
   /// Stop the reply that runs.
   Interrupt,
+  /// Stop the turn running on this thread, whoever started it (`Cancel`);
+  /// a message of this TUI's waiting behind it is interrupted unsent.
+  Cancel(String),
   /// Ask the node what runs in the background.
   Jobs,
   /// Stop a background job (`Job::id`).
@@ -1718,9 +1721,23 @@ impl App {
         self.status = "queued message dropped".into();
         Action::None
       }
+      // Waiting behind another turn on the thread (a report's, a job's
+      // note's): that turn is the one working, so Esc stops it too, not
+      // only this message, which comes back unsent.
+      KeyCode::Esc if self.pending.as_ref().is_some_and(|p| p.waiting) && self.thread.is_some() => {
+        self.status = "stopping the turn running on this thread".into();
+        Action::Cancel(self.thread.clone().expect("a thread"))
+      }
       KeyCode::Esc if self.pending.is_some() => {
         self.status = "interrupting".into();
         Action::Interrupt
+      }
+      // A turn this TUI did not start runs on the open thread (woken by a
+      // job, a report; typed elsewhere): Esc stops it, as the web app's
+      // Cancel does.
+      KeyCode::Esc if self.followed_turn_runs() => {
+        self.status = "stopping the turn running on this thread".into();
+        Action::Cancel(self.thread.clone().expect("a thread"))
       }
       // Esc Esc on an empty input: the message picker.
       KeyCode::Esc if self.input.is_empty() => {
@@ -4038,6 +4055,20 @@ impl App {
       ),
     ]));
     Text::from(lines)
+  }
+
+  /// A turn this TUI did not start runs on the open thread: a call of it
+  /// is in flight, or the list says the thread works.
+  pub fn followed_turn_runs(&self) -> bool {
+    let Some(open) = &self.thread else {
+      return false;
+    };
+    self.pending.is_none()
+      && (self.in_flight_call().is_some()
+        || self
+          .threads
+          .iter()
+          .any(|t| &t.id == open && super::tree::working(t)))
   }
 
   /// The open thread's running call, for a turn this TUI did not start
@@ -7011,6 +7042,28 @@ mod tests {
     app.input.clear();
     app.pending = Some(Pending::default());
     assert_eq!(app.on_key(key(KeyCode::Esc)), Action::Interrupt);
+  }
+
+  #[test]
+  fn esc_stops_a_turn_this_tui_did_not_start() {
+    let mut app = App::new("mbp", "anthropic/claude-opus-5-5");
+    app.set_threads(threads());
+    // t2 works (a job's note woke it): Esc stops it, not the picker.
+    app.thread = Some("t2".into());
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::Cancel("t2".into()));
+    // Waiting behind it with a message: that turn is stopped too.
+    app.pending = Some(Pending {
+      waiting: true,
+      ..Pending::default()
+    });
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::Cancel("t2".into()));
+    // Its own turn: interrupted on its connection, as before.
+    app.pending = Some(Pending::default());
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::Interrupt);
+    // Nothing runs on t1: Esc is the picker's first press.
+    app.pending = None;
+    app.thread = Some("t1".into());
+    assert_eq!(app.on_key(key(KeyCode::Esc)), Action::None);
   }
 
   #[test]

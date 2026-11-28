@@ -2380,6 +2380,21 @@ pub(crate) fn cancel_with(s: &Arc<Shared>, thread: &RecordId, text: &str) -> Res
     })?;
     return Ok(CancelledAt::Here);
   }
+  // No loop of its own, but a chat's turn runs on it here (the web app's
+  // Cancel of a turn it typed, from another connection than the chat's):
+  // that turn is interrupted, as the chat's own Esc does. Not a detached
+  // thread's work, so no report; its command stops with the turn.
+  let steer = s
+    .detached
+    .steers
+    .lock()
+    .expect("steers lock")
+    .get(thread.as_str())
+    .cloned();
+  if let Some(st) = steer {
+    st.interrupt();
+    return Ok(CancelledAt::Here);
+  }
   let record = s
     .state()
     .index
