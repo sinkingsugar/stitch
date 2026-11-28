@@ -52,6 +52,16 @@ fn main() {
     ("tests_never_see_the_users_sign_in", || {
       Box::pin(tests_never_see_the_users_sign_in())
     }),
+    ("a_held_call_stopped_then_a_message_reaches_agy", || {
+      Box::pin(a_held_call_stopped_then_a_message_reaches_agy())
+    }),
+    (
+      "a_restart_during_a_held_call_then_a_message_reaches_agy",
+      || Box::pin(a_restart_during_a_held_call_then_a_message_reaches_agy()),
+    ),
+    ("calls_agy_makes_at_once_are_answered_each_its_own", || {
+      Box::pin(calls_agy_makes_at_once_are_answered_each_its_own())
+    }),
     (
       "sessions_outlive_the_node_and_new_tools_restart_agy",
       || Box::pin(sessions_outlive_the_node_and_new_tools_restart_agy()),
@@ -442,6 +452,105 @@ async fn a_stopped_turn_is_cancelled_and_starts_fresh() {
   assert!(text.ends_with("wait\n\nagain"), "{text}");
 }
 
+/// The user stopped the turn while Stitch ran a tool agy called: the
+/// node's next request carries that call's result ("interrupted by the
+/// user") and the user's new message, which answer the held call, so the
+/// message reaches agy; and the message after that, as a prompt.
+async fn a_held_call_stopped_then_a_message_reaches_agy() {
+  let env = Env::new();
+  let p = env.provider();
+  let mut m = vec![user("call echo_tool {\"x\": 1}")];
+  let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+  assert_eq!(r.stop, StopReason::ToolUse);
+  let (id, _, _) = call_of(&r);
+  m.push(reply(&r));
+  m.push(Message::user(vec![Content::ToolResult {
+    id,
+    output: "interrupted by the user".into(),
+    is_error: true,
+  }]));
+  m.push(user("pls stop"));
+  let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+  let text = r.text();
+  assert!(text.contains("interrupted by the user"), "{text}");
+  assert!(text.contains("arrived while it ran.]\npls stop"), "{text}");
+  assert_eq!(r.stop, StopReason::EndTurn);
+  m.push(reply(&r));
+  m.push(user("continue pls"));
+  let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+  assert_eq!(r.text(), "echo: continue pls");
+  assert_eq!(env.count("session/new"), 1);
+  assert_eq!(env.prompts().last().unwrap(), "continue pls");
+}
+
+/// The node restarted while Stitch ran a tool agy called (the call agy
+/// waited on is gone): the next message starts a fresh session with the
+/// conversation as a transcript, the message last, and that session is the
+/// thread's from then on.
+async fn a_restart_during_a_held_call_then_a_message_reaches_agy() {
+  let env = Env::new();
+  let p = env.provider();
+  let mut m = vec![user("call echo_tool {\"x\": 1}")];
+  let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+  assert_eq!(r.stop, StopReason::ToolUse);
+  let (id, _, _) = call_of(&r);
+  drop(p);
+  let p = env.provider();
+  // The node's record of the cut call, as it reads it back.
+  m.push(reply(&r));
+  m.push(Message::user(vec![Content::ToolResult {
+    id,
+    output: "interrupted: no result was recorded".into(),
+    is_error: true,
+  }]));
+  m.push(user("continue pls"));
+  let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+  let text = r.text();
+  assert!(text.starts_with("echo: "), "{text}");
+  assert!(text.contains("call echo_tool"), "{text}");
+  assert!(text.contains("no result was recorded"), "{text}");
+  assert!(text.ends_with("continue pls"), "{text}");
+  assert_eq!(env.count("session/new"), 2);
+  m.push(reply(&r));
+  m.push(user("and then"));
+  let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+  assert_eq!(r.text(), "echo: and then");
+  assert_eq!(env.count("session/new"), 2);
+}
+
+/// agy makes several calls of one response at once: Stitch is given them
+/// one step at a time, and each answer goes back to its own call.
+async fn calls_agy_makes_at_once_are_answered_each_its_own() {
+  let env = Env::new();
+  let p = env.provider();
+  let mut m = vec![user("calls echo_tool 3")];
+  let mut seen = Vec::new();
+  let r = loop {
+    let r = ask(&p, &request(&m, &["echo_tool"])).await.0.unwrap();
+    if r.stop != StopReason::ToolUse {
+      break r;
+    }
+    let (id, name, input) = call_of(&r);
+    assert_eq!(name, "echo_tool");
+    let x = input["x"].as_u64().unwrap();
+    seen.push(x);
+    m.push(reply(&r));
+    m.push(Message::user(vec![Content::ToolResult {
+      id,
+      output: format!("OUT{x}"),
+      is_error: false,
+    }]));
+  };
+  seen.sort();
+  assert_eq!(seen, [1, 2, 3]);
+  assert!(
+    r.text().ends_with("Results: OUT1|OUT2|OUT3"),
+    "{}",
+    r.text()
+  );
+  assert_eq!(env.count("session/new"), 1);
+}
+
 async fn a_rewind_starts_a_fresh_session() {
   let env = Env::new();
   let p = env.provider();
@@ -751,6 +860,37 @@ mod fake {
           &session,
           json!({"sessionUpdate": "usage_update", "used": 1200, "size": 500000}),
         );
+        self.send(done("end_turn", Some(usage)));
+      } else if let Some(rest) = last.strip_prefix("calls ") {
+        // As agy does with several calls in one response: all at once.
+        let (tool, n) = rest.split_once(' ').unwrap();
+        let n: u64 = n.parse().unwrap();
+        self.chunk(&session, "Calling them.");
+        let calls: Vec<_> = (1..=n)
+          .map(|x| {
+            let f = self.clone();
+            let session = session.clone();
+            let tool = tool.to_owned();
+            tokio::spawn(async move {
+              let r = f
+                .mcp(
+                  json!({"jsonrpc": "2.0", "id": 10 + x, "method": "tools/call", "params": {
+                "name": tool, "arguments": {"x": x},
+                "_meta": {"antigravity.google/conversation_id": session}}}),
+                )
+                .await;
+              r["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+            })
+          })
+          .collect();
+        let mut outs = Vec::new();
+        for c in calls {
+          outs.push(c.await.unwrap());
+        }
+        self.chunk(&session, &format!("Results: {}", outs.join("|")));
         self.send(done("end_turn", Some(usage)));
       } else if last == "wait" {
         let n = self
