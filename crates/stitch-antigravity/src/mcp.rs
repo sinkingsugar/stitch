@@ -292,7 +292,7 @@ async fn respond(mcp: &Mcp, req: hyper::Request<Incoming>) -> hyper::Response<Fu
           out.push(a);
         }
       }
-      (!out.is_empty()).then(|| Value::Array(out))
+      (!out.is_empty()).then_some(Value::Array(out))
     }
     m => mcp.handle(&session, m).await,
   };

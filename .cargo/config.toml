@@ -11,3 +11,10 @@ include = [{ path = "dev-link.toml", optional = true }]
 # the VM's speed (design §2.17).
 [target.'cfg(all(any(target_arch = "aarch64", target_arch = "x86_64"), not(any(target_os = "ios", target_os = "visionos"))))']
 rustflags = ["-C", "llvm-args=-align-all-nofallthru-blocks=4"]
+
+# Where Google's `agy` sign-in is read from (the `antigravity` provider,
+# design §2.8): for everything cargo runs (tests, `cargo run`), a home with
+# no sign-in, so no test node sees the user's and none starts agy. An
+# installed `stitch` reads the user's home.
+[env]
+STITCH_AGY_HOME = { value = "target/no-agy-sign-in", relative = true, force = true }

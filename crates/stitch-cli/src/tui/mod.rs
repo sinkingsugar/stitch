@@ -2460,6 +2460,18 @@ async fn auth_action(
       stitch_node::github::logout(data)?;
       Ok("Signed out of GitHub here. GitHub keeps the authorization until it is revoked in its settings (Applications).".into())
     }
+    // agy's sign-in reads a code pasted on its own terminal, which the TUI
+    // holds: it runs from a shell.
+    AuthAction::Login { provider, .. } if provider == stitch_node::antigravity::KIND => {
+      Ok(format!(
+        "{}\n\nagy signs in on a terminal of its own: run `stitch auth login antigravity` in a shell \
+       (it prints a URL to open anywhere, then takes the code pasted back).",
+        stitch_node::antigravity::status(data)
+      ))
+    }
+    AuthAction::Logout { provider } if provider == stitch_node::antigravity::KIND => {
+      Ok(stitch_node::antigravity::LOGOUT.into())
+    }
     AuthAction::Login { provider, file } => {
       let service = Service::parse(&provider)?;
       let store = auth::login(
@@ -2492,8 +2504,10 @@ async fn auth_action(
       ))
     }
     AuthAction::Status { provider } => {
+      let agy = stitch_node::antigravity::KIND;
       let services = match provider.as_deref() {
         Some("github") => vec![],
+        Some(p) if p == agy => vec![],
         Some(p) => vec![Service::parse(p)?],
         None => vec![Service::Anthropic, Service::OpenAi, Service::Grok],
       };
@@ -2504,6 +2518,9 @@ async fn auth_action(
           service.name(),
           auth::status(data, service).await?
         ));
+      }
+      if provider.as_deref().is_none_or(|p| p == agy) {
+        lines.push(format!("{agy}: {}", stitch_node::antigravity::status(data)));
       }
       if matches!(provider.as_deref(), None | Some("github")) {
         lines.push(format!("github: {}", stitch_node::github::status(data)));

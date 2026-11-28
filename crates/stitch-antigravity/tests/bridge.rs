@@ -40,6 +40,9 @@ fn main() {
       Box::pin(a_rewind_starts_a_fresh_session())
     }),
     ("errors_are_errors", || Box::pin(errors_are_errors())),
+    ("tests_never_see_the_users_sign_in", || {
+      Box::pin(tests_never_see_the_users_sign_in())
+    }),
     (
       "sessions_outlive_the_node_and_new_tools_restart_agy",
       || Box::pin(sessions_outlive_the_node_and_new_tools_restart_agy()),
@@ -84,6 +87,7 @@ impl Env {
       args: vec!["acp".into()],
       env: vec![("FAKE_AGY".into(), "1".into())],
       token,
+      sign_in_home: data.clone(),
       hook: "true".into(),
     };
     Env {
@@ -338,6 +342,22 @@ async fn errors_are_errors() {
     Err(Error::Api { status: 401, .. })
   ));
   assert!(matches!(signed_out.models().await, Err(Error::NoKey(_))));
+}
+
+async fn tests_never_see_the_users_sign_in() {
+  // `.cargo/config.toml` points `STITCH_AGY_HOME` at a home with none.
+  let home = stitch_antigravity::sign_in_home();
+  assert!(
+    home.ends_with("target/no-agy-sign-in"),
+    "{}",
+    home.display()
+  );
+  let dir = tempfile::tempdir().unwrap();
+  let opts = Options::new(dir.path());
+  assert!(!opts.token.is_file());
+  let bridge = Arc::new(Bridge::new(opts.clone()));
+  assert!(bridge.ready().is_err());
+  assert!(opts.status().starts_with("not"), "{}", opts.status());
 }
 
 async fn sessions_outlive_the_node_and_new_tools_restart_agy() {

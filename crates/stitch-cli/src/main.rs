@@ -467,7 +467,8 @@ enum Command {
   /// `host`; their host keys; this device's key and authorizing it.
   #[command(subcommand)]
   Ssh(SshCommand),
-  /// Subscription sign-in (Anthropic, OpenAI/Codex, Grok).
+  /// Subscription sign-in (Anthropic, OpenAI/Codex, Grok; Google
+  /// Antigravity through its `agy` CLI).
   #[command(subcommand)]
   Auth(AuthCommand),
   /// Push notifications to your phones, sent by this node through Apple's
@@ -1570,8 +1571,9 @@ enum ApnsCommand {
 #[derive(Subcommand)]
 enum AuthCommand {
   /// Sign in: a subscription (`anthropic`, `openai`, `grok`: a browser
-  /// sign-in URL, then the local callback), or `github` (a code to enter
-  /// at github.com/login/device).
+  /// sign-in URL, then the local callback), `antigravity` (Google's `agy`
+  /// signs in: a URL to open anywhere, then the code pasted here; works
+  /// over SSH), or `github` (a code to enter at github.com/login/device).
   Login {
     provider: String,
     /// Store tokens in an owner-only file instead of the keychain.
@@ -1579,6 +1581,7 @@ enum AuthCommand {
     file: bool,
   },
   /// Remove the local subscription session (API keys are separate).
+  /// `antigravity`: says how (agy's sign-in is agy's: its `/logout`).
   Logout { provider: String },
   /// Show local sign-in state without printing or refreshing tokens.
   Status { provider: Option<String> },
@@ -4727,6 +4730,15 @@ fn run(cli: Cli) -> Result<()> {
             }).await?;
             println!("Signed in to GitHub as {}{}.", account.login, account.name.as_deref().map(|n| format!(" ({n})")).unwrap_or_default());
           }
+          AuthCommand::Login {provider,..} if provider == stitch_node::antigravity::KIND => {
+            // agy's own sign-in, on this terminal: blocking, so off the runtime's threads.
+            let data = data.clone();
+            let said = tokio::task::spawn_blocking(move || stitch_node::antigravity::login(&data)).await?;
+            println!("{}", said.map_err(|e| format!("antigravity: {e}"))?);
+          }
+          AuthCommand::Logout {provider} if provider == stitch_node::antigravity::KIND => {
+            println!("{}", stitch_node::antigravity::LOGOUT);
+          }
           AuthCommand::Login {provider,file} => {
             let service = Service::parse(provider)?;
             let store = auth::login(&data,service,if *file { Store::File } else { Store::Keychain }, |url| {
@@ -4744,11 +4756,16 @@ fn run(cli: Cli) -> Result<()> {
             println!("Signed out of {}.",service.name());
           }
           AuthCommand::Status {provider} => {
-            let services = match provider.as_deref() {Some("github") => vec![],Some(p) => vec![Service::parse(p)?],None => vec![Service::Anthropic,Service::OpenAi,Service::Grok]};
+            let agy = stitch_node::antigravity::KIND;
+            let services = match provider.as_deref() {Some("github") => vec![],Some(p) if p == agy => vec![],Some(p) => vec![Service::parse(p)?],None => vec![Service::Anthropic,Service::OpenAi,Service::Grok]};
             let config = stitch_node::config::Config::load(&data)?;
             for service in services {
               let billing = config.billing(&data, service.name()).await;
               println!("{}: {}; billed by {billing}",service.name(),auth::status(&data,service).await?);
+            }
+            if provider.as_deref().is_none_or(|p| p == agy) {
+              let billing = config.billing(&data, agy).await;
+              println!("{agy}: {}; billed by {billing}", stitch_node::antigravity::status(&data));
             }
             if matches!(provider.as_deref(), None | Some("github")) {
               println!("github: {}", stitch_node::github::status(&data));

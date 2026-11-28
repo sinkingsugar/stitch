@@ -58,15 +58,35 @@ pub struct Options {
   pub args: Vec<String>,
   /// Added to agy's environment (tests).
   pub env: Vec<(String, String)>,
-  /// The sign-in token agy wrote in the user's home.
+  /// The home agy signs in to (`sign_in_home`): where `stitch auth login
+  /// antigravity` runs agy's sign-in.
+  pub sign_in_home: PathBuf,
+  /// The sign-in token agy wrote there.
   pub token: PathBuf,
   /// The hook's command line, as agy runs it.
   pub hook: String,
 }
 
+/// Where agy's sign-in is read from: `STITCH_AGY_HOME` when set (the
+/// workspace's `.cargo/config.toml` sets it for everything cargo runs, so
+/// no test sees the user's sign-in), else the user's home.
+pub fn sign_in_home() -> PathBuf {
+  std::env::var_os("STITCH_AGY_HOME")
+    .filter(|h| !h.is_empty())
+    .or_else(|| std::env::var_os("HOME"))
+    .map(PathBuf::from)
+    .unwrap_or_default()
+}
+
+/// The token agy writes in `home` once signed in.
+pub fn token_in(home: &Path) -> PathBuf {
+  home.join(".gemini/antigravity-cli/antigravity-oauth-token")
+}
+
 impl Options {
   /// The defaults for the data directory `data`: `agy` from `STITCH_AGY`,
-  /// the `PATH`, else `~/.local/bin`; the hook this executable's.
+  /// the `PATH`, else `~/.local/bin`; the sign-in `sign_in_home`'s; the
+  /// hook this executable's.
   pub fn new(data: &Path) -> Options {
     let home = std::env::var_os("HOME")
       .map(PathBuf::from)
@@ -75,16 +95,107 @@ impl Options {
       .map(PathBuf::from)
       .or_else(|| in_path("agy"))
       .unwrap_or_else(|| home.join(".local/bin/agy"));
+    let sign_in_home = sign_in_home();
     Options {
       dir: data.join(KIND),
       program,
       args: vec!["acp".into()],
       env: Vec::new(),
-      token: home.join(".gemini/antigravity-cli/antigravity-oauth-token"),
+      token: token_in(&sign_in_home),
+      sign_in_home,
       hook: hook_command(),
     }
   }
+
+  /// How things stand, for `stitch auth status`.
+  pub fn status(&self) -> String {
+    if !self.program.is_file() {
+      format!(
+        "not available: Google's Antigravity CLI (`agy`) is not installed (not at {})",
+        self.program.display()
+      )
+    } else if self.token.is_file() {
+      format!("signed in through agy ({})", self.token.display())
+    } else {
+      "not signed in (`stitch auth login antigravity` runs agy's sign-in)".into()
+    }
+  }
+
+  /// agy's own sign-in, interactive on this terminal (`agy acp --login`:
+  /// a URL to open anywhere, then the code pasted back, so it works over
+  /// SSH), then `agy models` to confirm. The models it lists.
+  pub fn login(&self) -> std::result::Result<Vec<String>, String> {
+    if !self.program.is_file() {
+      return Err(format!(
+        "Google's Antigravity CLI (`agy`) is not installed here (not at {}); install it, then sign in again",
+        self.program.display()
+      ));
+    }
+    let cwd = self.dir.join("login");
+    std::fs::create_dir_all(&cwd).map_err(|e| format!("{}: {e}", cwd.display()))?;
+    let status = std::process::Command::new(&self.program)
+      .args(["acp", "--login"])
+      .env("HOME", &self.sign_in_home)
+      .current_dir(&cwd)
+      .status()
+      .map_err(|e| format!("could not run {}: {e}", self.program.display()))?;
+    if !status.success() {
+      return Err(format!("agy's sign-in did not finish ({status})"));
+    }
+    let models = self.cli_models(&cwd)?;
+    if models.is_empty() {
+      return Err("signed in, but `agy models` listed no models".into());
+    }
+    Ok(models)
+  }
+
+  /// `agy models`, within a minute.
+  fn cli_models(&self, cwd: &Path) -> std::result::Result<Vec<String>, String> {
+    let mut child = std::process::Command::new(&self.program)
+      .arg("models")
+      .env("HOME", &self.sign_in_home)
+      .current_dir(cwd)
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::piped())
+      .stderr(std::process::Stdio::piped())
+      .spawn()
+      .map_err(|e| format!("could not run {}: {e}", self.program.display()))?;
+    let start = std::time::Instant::now();
+    loop {
+      match child.try_wait() {
+        Ok(Some(_)) => break,
+        Ok(None) if start.elapsed() > std::time::Duration::from_secs(60) => {
+          let _ = child.kill();
+          return Err("`agy models` did not answer within a minute".into());
+        }
+        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+        Err(e) => return Err(e.to_string()),
+      }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+      return Err(format!(
+        "`agy models` failed: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+      ));
+    }
+    Ok(cli_model_ids(&String::from_utf8_lossy(&out.stdout)))
+  }
 }
+
+/// The IDs `agy models` prints, one model a line after its first.
+fn cli_model_ids(out: &str) -> Vec<String> {
+  out
+    .lines()
+    .filter(|l| !l.trim().is_empty() && !l.starts_with("Fetching"))
+    .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+    .collect()
+}
+
+/// What signing out is: agy's own, not Stitch's to delete.
+pub const LOGOUT: &str = "Stitch does not remove agy's sign-in: it is agy's own, shared with agy \
+  itself. To sign out, run `agy` and type /logout. Until you sign in again, \
+  antigravity/… models do not run here.";
 
 fn in_path(name: &str) -> Option<PathBuf> {
   std::env::split_paths(&std::env::var_os("PATH")?)
@@ -1040,6 +1151,16 @@ mod tests {
     assert_eq!(
       (u.input_tokens, u.cache_read_tokens, u.output_tokens),
       (10, 5, 5)
+    );
+  }
+
+  #[test]
+  fn agys_model_list_is_read() {
+    let out = "Fetching available models...\ngemini-4-hydrogen-high  Gemini 4 Hydrogen (High)\n\
+               claude-sonnet-4-6       Claude Sonnet 4.6 (Thinking)\n\n";
+    assert_eq!(
+      cli_model_ids(out),
+      ["gemini-4-hydrogen-high", "claude-sonnet-4-6"]
     );
   }
 

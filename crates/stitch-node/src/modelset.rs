@@ -15,7 +15,7 @@
 //! one, else the built-in one of the
 //! first provider with credentials here (`BUILTIN`; subscriptions before
 //! API keys, then anthropic, openai, gemini, grok, kimi, deepseek,
-//! openrouter; nothing
+//! openrouter, antigravity; nothing
 //! reserved), else `DEFAULT_MODEL`. The quick model likewise (the node's
 //! `quick_model` over the synced one); when none is set, it is
 //! the mid tier of the default's provider when the default is that
@@ -291,6 +291,9 @@ pub(crate) const BUILTIN: &[(&str, &str, Option<&str>)] = &[
     "anthropic/claude-opus-5.5",
     Some("anthropic/claude-sonnet-5.5"),
   ),
+  // The Google Antigravity plan through agy (design §2.8, Antigravity):
+  // its largest Gemini, and Flash for quick.
+  ("antigravity", "gemini-4-hydrogen", Some("gemini-3.8-flash")),
 ];
 
 /// The provider's order when none is configured.
@@ -302,6 +305,9 @@ const ORDER: &[&str] = &[
   "kimi",
   "deepseek",
   "openrouter",
+  // A subscription, so before every API key; last among them: it runs
+  // through another program (agy) rather than a native adapter.
+  "antigravity",
 ];
 
 /// The provider of `model` (`provider/model`).
@@ -818,6 +824,28 @@ mod tests {
     let d = pick_default(billing, &always).unwrap_or_else(|| crate::config::DEFAULT_MODEL.into());
     let q = pick_quick(&d, &always).0;
     (d, q)
+  }
+
+  #[test]
+  fn antigravity_is_the_last_subscription_and_before_any_key() {
+    let pair = (
+      "antigravity/gemini-4-hydrogen".to_owned(),
+      "antigravity/gemini-3.8-flash".to_owned(),
+    );
+    assert_eq!(pick(&[("antigravity", "subscription")]), pair);
+    assert_eq!(
+      pick(&[("anthropic", "API key"), ("antigravity", "subscription")]),
+      pair
+    );
+    let both = [("openai", "subscription"), ("antigravity", "subscription")];
+    assert_eq!(pick(&both).0, "openai/gpt-5.6-sol");
+    // A list already held without the model: skipped.
+    let listed = |m: &str| m != "antigravity/gemini-4-hydrogen";
+    let billing = [("antigravity", "subscription"), ("gemini", "API key")];
+    assert_eq!(
+      pick_default(&billing, &listed).unwrap(),
+      "gemini/gemini-3.1-pro-preview"
+    );
   }
 
   #[test]

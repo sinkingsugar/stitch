@@ -980,7 +980,8 @@ const HELP: &str = "\
 /1 … /6                   send a preset reply the agent offered (listed ↳ after its reply),
                           while nothing was written since
 /app [name]               open the latest app this thread showed (or a pinned one) in the browser
-/login [provider]         sign in to a subscription, or github (--file: no keychain)
+/login [provider]         sign in to a subscription, or github (--file: no keychain);
+                          antigravity: agy signs in from a shell (`stitch auth login antigravity`)
 /logout [provider]        sign out
 /auth [provider]          subscription sign-in status
 /help                     this list
