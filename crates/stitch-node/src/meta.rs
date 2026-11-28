@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use stitch_providers::{Content, Message, Request};
 use stitch_records::{Author, Draft, RecordId, Ref, kinds};
+use stitch_store::RecordRoot;
 
 use crate::chat::ChatContext;
 use crate::node::Shared;
@@ -22,6 +23,19 @@ pub(crate) fn set(
   author: Author,
 ) -> Result<()> {
   let (root, _) = s.thread_place(target)?;
+  set_in(s, &root, target, field, value, author)
+}
+
+/// `set` in `root`: for a thread whose record is not written yet (a new
+/// chat's, named before its turn writes it), in the place it is made in.
+pub(crate) fn set_in(
+  s: &Shared,
+  root: &RecordRoot,
+  target: &RecordId,
+  field: &str,
+  value: toml::Value,
+  author: Author,
+) -> Result<()> {
   let state = s.state();
   let heads: Vec<RecordId> = {
     let index = state.index.lock().expect("index lock");
@@ -57,7 +71,7 @@ pub(crate) fn set(
     draft = draft.reference("supersedes", Ref::to(h))?;
   }
   root.publish(&state.node, draft)?;
-  state.index.lock().expect("index lock").refresh(&root)?;
+  state.index.lock().expect("index lock").refresh(root)?;
   Ok(())
 }
 
@@ -110,12 +124,25 @@ pub fn thread_model(index: &stitch_store::Index, thread: &RecordId) -> Option<St
 /// continuing it run on it: a `set` of `model`, written only when it
 /// changes.
 pub(crate) fn keep_model(s: &Shared, thread: &RecordId, model: &str) -> Result<()> {
+  let (root, _) = s.thread_place(thread)?;
+  keep_model_in(s, &root, thread, model)
+}
+
+/// `keep_model` in `root`: also for a new chat's thread, before its turn
+/// writes its record (the turn may never end: a restart cuts it).
+pub(crate) fn keep_model_in(
+  s: &Shared,
+  root: &RecordRoot,
+  thread: &RecordId,
+  model: &str,
+) -> Result<()> {
   let current = thread_model(&s.state().index.lock().expect("index lock"), thread);
   if current.as_deref() == Some(model) {
     return Ok(());
   }
-  set(
+  set_in(
     s,
+    root,
     thread,
     "model",
     model.into(),

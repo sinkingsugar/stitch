@@ -567,6 +567,7 @@ pub(crate) async fn tool(
           &problems,
           &default,
           &crate::modelset::shown(&crate::modelset::quick_said(&s, place.as_ref()).await),
+          &crate::modelset::unmetered(&s),
         ))
       }
       .await;

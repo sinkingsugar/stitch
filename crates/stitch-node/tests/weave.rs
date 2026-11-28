@@ -4341,6 +4341,72 @@ async fn a_nodes_own_models_win_over_the_synced_ones() {
   node.wait().await.unwrap();
 }
 
+/// A new chat's picked model is the thread's from its turn's start: a turn
+/// that never ends well (cut by a restart, or failed) still leaves it, so
+/// clients show it and the next turn, typed with no pick (the web client
+/// forgets a new chat's once its stream ends), runs on it, not the default.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_chats_pick_is_kept_though_its_first_turn_never_ends() {
+  let dir = tempfile::tempdir().unwrap();
+  let broken = "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\nconnection: \
+                close\r\n\r\n{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\
+                \"message\":\"something broke\"}}"
+    .to_owned();
+  let (node, mut c, sent) = alone(
+    dir.path(),
+    vec![(
+      "CUT",
+      vec![
+        tool_call("c1", "threads", json!({})),
+        broken,
+        answer("Back."),
+      ],
+    )],
+  )
+  .await;
+  model_settings(
+    &mut c,
+    json!({"action": "default", "model": "anthropic/claude-opus-5"}),
+  )
+  .await;
+  let mut first = global_chat(None, "CUT: start something long");
+  if let Request::Chat { model, .. } = &mut first {
+    *model = Some("anthropic/claude-sonnet-5-5".into());
+  }
+  let mut thread = None;
+  let r = c
+    .chat(&first, |r| {
+      if let Reply::Thread(t) = r {
+        thread = Some(t.clone());
+      }
+      None
+    })
+    .await;
+  assert!(r.is_err(), "{r:?}");
+  let thread = thread.expect("the new chat's thread");
+  let effective = c
+    .request(&Request::EffectiveModel {
+      thread: Some(thread.clone()),
+      model: None,
+      place: None,
+      cwd: None,
+    })
+    .await
+    .unwrap();
+  let Reply::Lines(lines) = effective else {
+    panic!("{effective:?}")
+  };
+  assert_eq!(lines, ["anthropic/claude-sonnet-5-5"]);
+  c.chat(&global_chat(Some(thread.clone()), "continue pls"), |_| None)
+    .await
+    .unwrap();
+  let asked = of(&sent, "CUT");
+  assert_eq!(asked.len(), 3, "{asked:?}");
+  assert_eq!(asked[2]["model"], "claude-sonnet-5-5");
+  c.request(&Request::Stop).await.unwrap();
+  node.wait().await.unwrap();
+}
+
 /// Clients display the exact same resolution that a turn uses, without
 /// converting a displayed default into a permanent explicit thread pick.
 #[tokio::test(flavor = "multi_thread")]

@@ -4608,6 +4608,20 @@ async fn chat_steered(
     &tool_entries,
     &crate::toolset::parse_all(&skill_changes)?,
   )?;
+  // The model picked is the thread's from now, kept as its turn starts:
+  // a turn a restart (or a failure) cuts never reaches its end, and the
+  // client forgets a new chat's pick once its stream ends, so the next
+  // turn ran on the default.
+  if let Some(picked) = &picked {
+    let kept = if crate::modelset::ALIASES.contains(&picked.as_str()) {
+      picked
+    } else {
+      &full_model
+    };
+    if let Err(e) = crate::meta::keep_model_in(s, &root, this, kept) {
+      eprintln!("thread {this}: its model not kept: {e}");
+    }
+  }
   // A new thread's memory, as `/memory` chose before it started, wins
   // over its place's.
   match chosen_memory.filter(|_| new_id.is_some() && s.memory.available()) {
@@ -4897,7 +4911,9 @@ async fn chat_steered(
       Ok(o) => {
         drop(steering.take());
         // The model picked is the thread's from now: the turns nobody
-        // types and other nodes continuing it run on it.
+        // types and other nodes continuing it run on it. Kept as the turn
+        // started (above); again here for the thread it ended in, when it
+        // compacted into a new one (no write when it already is).
         if let Some(picked) = &picked {
           let kept = if crate::modelset::ALIASES.contains(&picked.as_str()) {
             picked

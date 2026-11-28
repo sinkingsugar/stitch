@@ -135,15 +135,32 @@ fn num(x: f64) -> String {
   s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
+/// The providers whose calls cost nothing counted per token (an
+/// Antigravity plan's, `Provider::metered`): a list price that matches one
+/// of their models by name is not theirs, so `render` shows none.
+pub(crate) fn unmetered(s: &Shared) -> Vec<String> {
+  let mut names: Vec<String> = s.config.providers.keys().cloned().collect();
+  if !names.iter().any(|n| n == crate::config::ANTIGRAVITY) {
+    names.push(crate::config::ANTIGRAVITY.into());
+  }
+  names.retain(|n| {
+    s.config
+      .provider_config(n)
+      .is_some_and(|c| c.kind == crate::config::ANTIGRAVITY)
+  });
+  names
+}
+
 /// What `models` says: the default and quick models, then each model with
-/// its price where known, reserved ones marked; then why some providers
-/// listed none.
+/// its price where known (none for the `unmetered` providers' unless set),
+/// reserved ones marked; then why some providers listed none.
 pub fn render(
   settings: &BTreeMap<String, ModelSettings>,
   models: &[String],
   problems: &[String],
   default: &str,
   quick: &str,
+  unmetered: &[String],
 ) -> String {
   let mut out = format!("default: {default}\nquick: {quick} (spawn with model \"quick\")\n");
   if models.is_empty() {
@@ -174,9 +191,13 @@ pub fn render(
     let set = configured(settings, m).unwrap_or_default();
     let name = m.split_once('/').map_or(m.as_str(), |(_, n)| n);
     out.push_str(m);
-    let price = set
-      .price
-      .or_else(|| crate::pricing::list_price(name).map(|(i, o)| format!("{}/{}", num(i), num(o))));
+    let metered = !unmetered.iter().any(|u| u == provider_of(m));
+    let price = set.price.or_else(|| {
+      metered
+        .then(|| crate::pricing::list_price(name))
+        .flatten()
+        .map(|(i, o)| format!("{}/{}", num(i), num(o)))
+    });
     if let Some(p) = price {
       out.push_str(&format!("  {p}"));
     }
@@ -534,10 +555,17 @@ pub(crate) async fn request(s: &Arc<Shared>, input: Input) -> Result<Vec<String>
         d @ (_, true) if here && d.0 == default => shown(&d),
         _ => default,
       };
-      let mut out: Vec<String> = render(&settings(s), &models, &problems, &default, &quick)
-        .lines()
-        .map(str::to_owned)
-        .collect();
+      let mut out: Vec<String> = render(
+        &settings(s),
+        &models,
+        &problems,
+        &default,
+        &quick,
+        &unmetered(s),
+      )
+      .lines()
+      .map(str::to_owned)
+      .collect();
       if here {
         for role in ["default", "quick"] {
           if let Some(m) = node_own(s, role) {
@@ -764,6 +792,7 @@ mod tests {
       &[],
       "anthropic/claude-opus-5-5",
       "anthropic/claude-sonnet-5-5",
+      &[],
     );
     assert!(out.starts_with(
       "default: anthropic/claude-opus-5-5\nquick: anthropic/claude-sonnet-5-5 (spawn with \
@@ -774,6 +803,41 @@ mod tests {
        name)  (newest)\n"
     ));
     assert!(out.contains("\nanthropic/claude-haiku-5-5  0.1/0.5\n"));
+  }
+
+  /// An unmetered provider's models (Antigravity's) carry no list price
+  /// matched by their name, though the same model elsewhere does; one the
+  /// user set is still shown.
+  #[test]
+  fn an_unmetered_providers_models_show_no_list_price() {
+    let mut settings = BTreeMap::new();
+    settings.insert(
+      "antigravity/claude-sonnet-5-5".to_owned(),
+      ModelSettings {
+        price: Some("1/1".into()),
+        ..Default::default()
+      },
+    );
+    let models = [
+      "anthropic/claude-opus-5-5",
+      "antigravity/claude-opus-5-5",
+      "antigravity/claude-sonnet-5-5",
+    ]
+    .map(String::from);
+    let out = render(
+      &settings,
+      &models,
+      &[],
+      "anthropic/claude-opus-5-5",
+      "anthropic/claude-sonnet-5-5",
+      &["antigravity".into()],
+    );
+    assert!(out.contains("\nanthropic/claude-opus-5-5  4/20\n"), "{out}");
+    assert!(out.contains("\nantigravity/claude-opus-5-5\n"), "{out}");
+    assert!(
+      out.contains("\nantigravity/claude-sonnet-5-5  1/1\n"),
+      "{out}"
+    );
   }
 
   #[test]
@@ -796,6 +860,7 @@ mod tests {
       &[],
       "openrouter/vendor/model-3 (built-in)",
       "openrouter/vendor/model-4",
+      &[],
     );
     let listed: Vec<&str> = out
       .lines()

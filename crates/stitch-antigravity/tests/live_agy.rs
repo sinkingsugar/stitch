@@ -265,6 +265,24 @@ async fn a_tools_image_and_pdf_reach_the_model() {
   eprintln!("{}: PDF in a prompt: {said:?}", model());
 }
 
+/// The first listing of a node's life starts agy (its process, a session):
+/// it must answer well within the node's listing timeout (15 s). Prints
+/// how long the cold and the warm listing took.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "drives the real agy on the Antigravity plan"]
+async fn the_cold_listing_answers_within_the_nodes_timeout() {
+  let dir = tempfile::tempdir().unwrap();
+  let p = live(dir.path());
+  let t = std::time::Instant::now();
+  let models = p.models().await.unwrap();
+  let cold = t.elapsed();
+  let t = std::time::Instant::now();
+  p.models().await.unwrap();
+  let warm = t.elapsed();
+  eprintln!("{} models: cold {cold:?}, warm {warm:?}", models.len());
+  assert!(cold < std::time::Duration::from_secs(10), "cold {cold:?}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "drives the real agy on the Antigravity plan"]
 async fn a_tool_turn_and_a_second_turn_on_the_real_agy() {
