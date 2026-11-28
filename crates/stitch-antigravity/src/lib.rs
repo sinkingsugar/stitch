@@ -22,6 +22,7 @@
 //! agy's conversations), so a session moves between processes.
 
 mod acp;
+pub mod context;
 mod errors;
 pub mod hook;
 mod mcp;
@@ -307,8 +308,10 @@ struct Saved {
 #[derive(Default)]
 struct Catalog {
   models: Option<Vec<String>>,
-  windows: HashMap<String, u64>,
-  any_window: Option<u64>,
+  /// Its windows (`usage_update`'s `size`), by model.
+  sizes: HashMap<String, u64>,
+  /// The context it was seen compacting at, by model (`windows.json`).
+  limits: BTreeMap<String, u64>,
 }
 
 /// A process and the tool set it serves.
@@ -368,6 +371,12 @@ struct ThreadState {
   in_turn: Option<Busy>,
   /// The model and thought level set on the open session.
   set: Option<(String, Option<String>)>,
+  /// Its usage, as told step by step.
+  meter: context::Meter,
+  /// agy compacted the session during this turn: it starts fresh next.
+  compacted: bool,
+  /// Why the session is `dirty`, when not a turn cut off.
+  dirty_why: Option<&'static str>,
 }
 
 pub struct Bridge {
@@ -422,6 +431,10 @@ fn protocol(message: impl std::fmt::Display) -> Error {
 
 impl Bridge {
   pub fn new(opts: Options) -> Bridge {
+    let limits = std::fs::read(opts.dir.join("windows.json"))
+      .ok()
+      .and_then(|b| serde_json::from_slice(&b).ok())
+      .unwrap_or_default();
     let saved = std::fs::read(opts.dir.join("sessions.json"))
       .ok()
       .and_then(|b| serde_json::from_slice(&b).ok())
@@ -433,7 +446,10 @@ impl Bridge {
       procs: tokio::sync::Mutex::new(Vec::new()),
       reaping: OnceLock::new(),
       threads: Mutex::new(HashMap::new()),
-      catalog: Mutex::new(Catalog::default()),
+      catalog: Mutex::new(Catalog {
+        limits,
+        ..Catalog::default()
+      }),
       saved: Mutex::new(saved),
     }
   }
@@ -759,10 +775,32 @@ impl Bridge {
       .ok_or_else(|| protocol("agy listed no models"))
   }
 
-  /// The window agy said for `model` (its `usage_update`'s `size`).
+  /// The window Stitch measures `model` against: the context agy was seen
+  /// compacting it at, else a guess at where agy would, below its own
+  /// window (`context`).
   pub fn window(&self, model: &str) -> Option<u64> {
     let c = self.catalog.lock().expect("catalog lock");
-    c.windows.get(model).copied().or(c.any_window)
+    if let Some(l) = c.limits.get(model) {
+      return Some(*l);
+    }
+    let size = c
+      .sizes
+      .get(model)
+      .copied()
+      .or_else(|| context::known_size(model))?;
+    Some(context::compaction_guess(size))
+  }
+
+  /// agy compacted `model`'s session at `before`: remembered, so Stitch
+  /// compacts first next time.
+  fn learn_limit(&self, model: &str, before: u64) {
+    let mut c = self.catalog.lock().expect("catalog lock");
+    let l = c.limits.entry(model.to_owned()).or_insert(before);
+    *l = (*l).min(before);
+    let _ = std::fs::create_dir_all(&self.opts.dir);
+    if let Ok(text) = serde_json::to_vec_pretty(&c.limits) {
+      let _ = std::fs::write(self.opts.dir.join("windows.json"), text);
+    }
   }
 
   async fn stream(
@@ -828,7 +866,7 @@ impl Bridge {
     if let Plan::Fresh { blocks, why } = &plan {
       if turn.st.session.is_some() {
         let why = if turn.st.dirty {
-          "its last turn did not finish"
+          turn.st.dirty_why.unwrap_or("its last turn did not finish")
         } else {
           why
         };
@@ -954,7 +992,9 @@ impl Bridge {
     st.proc = Some(proc);
     st.set = None;
     st.dirty = false;
+    st.dirty_why = None;
     st.synced.clear();
+    st.meter = context::Meter::default();
     self.set_model(st, req, level).await
   }
 
@@ -1031,6 +1071,7 @@ impl Bridge {
       let _ = tx.send(SessionEvent::Done(r));
     });
     turn.st.in_turn = Some(Busy::new(proc.clone()));
+    turn.st.meter.new_turn();
     turn.armed = true;
   }
 
@@ -1088,8 +1129,18 @@ impl Bridge {
           Some("usage_update") => {
             if let Some(size) = u.get("size").and_then(Value::as_u64).filter(|s| *s > 0) {
               let mut c = self.catalog.lock().expect("catalog lock");
-              c.windows.insert(model.to_owned(), size);
-              c.any_window = Some(size);
+              c.sizes.insert(model.to_owned(), size);
+            }
+            if let Some(used) = u.get("used").and_then(Value::as_u64)
+              && let Some(before) = turn.st.meter.used(used)
+            {
+              eprintln!(
+                "antigravity {}: agy compacted the session at {before} tokens ({model}); \
+                 Stitch compacts first from now on, and the session starts fresh",
+                turn.st.key
+              );
+              self.learn_limit(model, before);
+              turn.st.compacted = true;
             }
           }
           _ => {}
@@ -1130,7 +1181,7 @@ impl Bridge {
             content,
             native: None,
             stop: StopReason::ToolUse,
-            usage: Usage::default(),
+            usage: turn.st.meter.step(),
             cost: None,
           });
         }
@@ -1184,13 +1235,20 @@ impl Bridge {
               native: None,
             }));
           }
+          let usage = turn.st.meter.end(usage.map(usage_of).unwrap_or_default());
+          // agy's own compaction left the session apart from Stitch's
+          // record: the next request starts fresh with Stitch's.
+          if std::mem::take(&mut turn.st.compacted) {
+            turn.st.dirty = true;
+            turn.st.dirty_why = Some("agy compacted it on its own");
+          }
           self.save(&turn.st);
           return Ok(Response {
             model: named,
             content,
             native: None,
             stop,
-            usage: usage.map(usage_of).unwrap_or_default(),
+            usage,
             cost: None,
           });
         }

@@ -40,6 +40,9 @@ fn main() {
       Box::pin(a_rewind_starts_a_fresh_session())
     }),
     ("errors_are_errors", || Box::pin(errors_are_errors())),
+    ("stitch_owns_compaction", || {
+      Box::pin(stitch_owns_compaction())
+    }),
     ("a_tools_image_goes_back_in_its_result", || {
       Box::pin(a_tools_image_goes_back_in_its_result())
     }),
@@ -232,6 +235,7 @@ async fn a_tool_step_goes_through_the_held_call() {
   let (r, streamed) = ask(&p, &request(&m, &["echo_tool"])).await;
   let r = r.unwrap();
   assert_eq!(r.stop, StopReason::ToolUse);
+  assert_eq!(r.usage.input_tokens, 1000);
   assert_eq!(r.model, "antigravity/fake-pro");
   assert_eq!(r.text(), "Calling.");
   assert_eq!(streamed, "Calling.");
@@ -263,7 +267,9 @@ async fn a_tool_step_goes_through_the_held_call() {
       .starts_with("Result: OUT\n\n[Not part of the tool's output")
   );
   assert!(r.text().ends_with("and hurry"), "{}", r.text());
-  assert_eq!(r.usage.input_tokens, 10);
+  // Each step is told its own prompt (agy's `used`), the last the turn's
+  // output and the cache reads agy counted.
+  assert_eq!(r.usage.input_tokens + r.usage.cache_read_tokens, 1200);
   assert_eq!(r.usage.cache_read_tokens, 5);
   assert_eq!(r.usage.output_tokens, 4);
 
@@ -285,8 +291,8 @@ async fn a_tool_step_goes_through_the_held_call() {
     "{}",
     r.text()
   );
-  // The context window agy said.
-  assert_eq!(p.context_window("fake-pro").await.unwrap(), Some(500_000));
+  // The window agy said (500,000), less a guess at its own compaction.
+  assert_eq!(p.context_window("fake-pro").await.unwrap(), Some(160_000));
   assert_eq!(p.models().await.unwrap(), ["fake-pro", "fake-flash"]);
 }
 
@@ -337,6 +343,74 @@ async fn a_tools_image_goes_back_in_its_result() {
     png
   );
   assert_eq!(result["isError"], false);
+}
+
+async fn stitch_owns_compaction() {
+  let env = Env::new();
+  let bridge = Arc::new(Bridge::new(env.opts.clone()));
+  let p = env.provider_of(bridge.clone());
+  // Before any session: agy's window by family, less a guess at its own
+  // compaction.
+  assert_eq!(bridge.window("gemini-3.8-flash"), Some(512_000));
+  assert_eq!(bridge.window("claude-sonnet-4-6"), Some(160_000));
+  assert_eq!(bridge.window("gpt-oss-120b-medium"), Some(80_000));
+  // The fake's window (500,000), told by the session, guessed under.
+  let mut m = vec![user("hi")];
+  let r = ask(&p, &request(&m, &[])).await.0.unwrap();
+  assert_eq!(bridge.window("fake-pro"), Some(160_000));
+  // agy compacting on its own: its size before is learned (and kept), and
+  // the session starts fresh next, from Stitch's record.
+  m.push(reply(&r));
+  m.push(user("compact"));
+  let r = ask(&p, &request(&m, &[])).await.0.unwrap();
+  assert_eq!(r.usage.input_tokens + r.usage.cache_read_tokens, 60_000);
+  assert_eq!(bridge.window("fake-pro"), Some(60_000));
+  assert_eq!(
+    Bridge::new(env.opts.clone()).window("fake-pro"),
+    Some(60_000)
+  );
+  m.push(reply(&r));
+  m.push(user("after"));
+  let r = ask(&p, &request(&m, &[])).await.0.unwrap();
+  assert_eq!(env.count("session/new"), 2);
+  assert!(r.text().contains("User:\ncompact"), "{}", r.text());
+  // Stitch's own compaction: a new thread, its first message the summary;
+  // its session starts from that and the messages kept, with the system
+  // prompt.
+  let summary = "[Summary of the conversation so far: the user asked for HERON-5.]";
+  let mut compacted = request(
+    &[
+      user(summary),
+      Message {
+        role: Role::Assistant,
+        content: vec![Content::Text("Noted.".into())],
+        native: None,
+      },
+      user("go on"),
+    ],
+    &[],
+  );
+  compacted.cache_key = Some("thread-1-compacted".into());
+  let r = ask(&p, &compacted).await.0.unwrap();
+  assert_eq!(env.count("session/new"), 3);
+  let prompt = env.prompts().last().unwrap().clone();
+  assert!(prompt.contains(&format!("User:\n{summary}")), "{prompt}");
+  assert!(prompt.contains("Assistant:\nNoted."), "{prompt}");
+  assert!(prompt.ends_with("go on"), "{prompt}");
+  assert!(
+    r.text()
+      .starts_with("echo: [Stitch: this conversation began")
+  );
+  let news: Vec<Value> = env
+    .log()
+    .into_iter()
+    .filter(|(m, _)| m == "session/new")
+    .map(|(_, p)| p)
+    .collect();
+  assert_eq!(
+    news.last().unwrap()["_meta"]["antigravity"]["systemPrompt"]["append"],
+    "You are a test."
+  );
 }
 
 async fn a_stopped_turn_is_cancelled_and_starts_fresh() {
@@ -649,6 +723,10 @@ mod fake {
         self.chunk(&session, "Calling.");
         self.update(
           &session,
+          json!({"sessionUpdate": "usage_update", "used": 1000, "size": 500000}),
+        );
+        self.update(
+          &session,
           json!({"sessionUpdate": "tool_call", "toolCallId": "call_1", "name": format!("mcp_stitch_{tool}"), "status": "in_progress"}),
         );
         let r = self
@@ -669,6 +747,10 @@ mod fake {
           ""
         };
         self.chunk(&session, &format!("Result: {out}{failed}"));
+        self.update(
+          &session,
+          json!({"sessionUpdate": "usage_update", "used": 1200, "size": 500000}),
+        );
         self.send(done("end_turn", Some(usage)));
       } else if last == "wait" {
         let n = self
@@ -681,6 +763,16 @@ mod fake {
         self.chunk(&session, "Waiting");
         n.notified().await;
         self.send(done("cancelled", Some(usage)));
+      } else if last == "compact" {
+        // As agy compacting on its own: the context falls.
+        for used in [60_000, 9_000] {
+          self.update(
+            &session,
+            json!({"sessionUpdate": "usage_update", "used": used, "size": 500000}),
+          );
+        }
+        self.chunk(&session, "Compacted.");
+        self.send(done("end_turn", Some(usage)));
       } else if last == "quota" {
         self.chunk(
           &session,

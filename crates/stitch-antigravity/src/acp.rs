@@ -119,6 +119,9 @@ impl AgyProc {
     cmd
       .args(s.args)
       .env("HOME", s.home)
+      // agy's own auto-compaction no earlier than its window, where agy
+      // honours the override (Stitch compacts first; `context`).
+      .env("AGY_CLI_AUTO_COMPACT_OVERRIDE", "100%")
       .current_dir(s.cwd)
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())

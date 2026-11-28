@@ -24,6 +24,11 @@ impl Windows {
   fn known(&self, model: &str) -> Option<Option<u64>> {
     let map = self.0.lock().expect("windows lock");
     match map.get(model) {
+      // Antigravity's moves when agy is seen compacting (design §2.8):
+      // asked again (no network: the bridge's own numbers).
+      Some((at, Some(_))) if model.starts_with("antigravity/") && at.elapsed() >= RETRY_AFTER => {
+        None
+      }
       Some((_, Some(w))) => Some(Some(*w)),
       Some((at, None)) if at.elapsed() < RETRY_AFTER => Some(None),
       _ => None,
