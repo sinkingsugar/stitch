@@ -1188,6 +1188,7 @@ async fn a_wait_ends_when_the_user_writes_not_on_a_guessed_time() {
                 id: 1,
                 text: "Stop waiting, what's the status?".into(),
                 attachments: vec![],
+                scopes: vec![],
               })
               .unwrap();
           });

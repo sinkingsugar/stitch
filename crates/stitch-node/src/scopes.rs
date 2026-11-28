@@ -106,6 +106,7 @@ pub(crate) async fn of_record(s: &Arc<Shared>, record: &stitch_records::Record) 
   if targets.is_empty() {
     return None;
   }
+  fetch_unknown(s, &targets).await;
   let mut ok = Vec::new();
   {
     let index = s.state().index.lock().expect("index lock");
@@ -617,11 +618,45 @@ fn header(now: Timestamp) -> String {
   )
 }
 
+/// How long resolving a scope waits on the node that made a thread not
+/// here yet.
+const FETCH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Threads `targets` name that this node has not synced yet (one just
+/// made on another node: the picker lists it, a message to a turn running
+/// elsewhere names it) are fetched first: a sync with the node whose ID
+/// each bears, which made it, for `FETCH_WAIT` at most. One still not here
+/// after is refused (`resolve`) or left out (`of_record`) as before.
+async fn fetch_unknown(s: &Arc<Shared>, targets: &[ScopeTarget]) {
+  let here = s.state().node.to_string();
+  let mut from: Vec<String> = Vec::new();
+  {
+    let index = s.state().index.lock().expect("index lock");
+    for t in targets {
+      let Ok(id) = t.id.parse::<RecordId>() else {
+        continue;
+      };
+      let node = id.node().to_owned();
+      if node != here && !from.contains(&node) && !known(&index, &id) {
+        from.push(node);
+      }
+    }
+  }
+  for node in from {
+    // Boxed: what a sync brings in (an assignment) may resolve scopes.
+    let sync = Box::pin(crate::node::sync_all(s, Some(&node)));
+    if tokio::time::timeout(FETCH_WAIT, sync).await.is_err() {
+      eprintln!("scope: a thread of {node}'s not synced in time");
+    }
+  }
+}
+
 /// Resolves `targets` and renders their briefing; `None` without any.
 pub(crate) async fn scoped(s: &Arc<Shared>, targets: &[ScopeTarget]) -> Result<Option<Scoped>> {
   if targets.is_empty() {
     return Ok(None);
   }
+  fetch_unknown(s, targets).await;
   let (s, targets) = (s.clone(), targets.to_vec());
   tokio::task::spawn_blocking(move || scoped_now(&s, &targets, Timestamp::now()))
     .await

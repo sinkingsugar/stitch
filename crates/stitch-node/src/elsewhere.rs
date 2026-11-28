@@ -804,7 +804,7 @@ pub(crate) async fn chat(
     arrival.as_mut().enable();
     // What the client typed meanwhile goes to that turn too.
     for i in steer.take() {
-      if i.text.trim().is_empty() && i.attachments.is_empty() {
+      if i.text.trim().is_empty() && i.attachments.is_empty() && i.scope.is_none() {
         continue;
       }
       let sent = crate::weave::forward(

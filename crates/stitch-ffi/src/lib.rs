@@ -1614,12 +1614,30 @@ impl Stitch {
   /// ends, the caller sends it as a turn of its own. `false`: no chat of
   /// this app runs on the thread.
   pub fn queue_message(&self, thread: String, id: u64, text: String) -> bool {
+    self.queue_message_with(thread, id, text, Vec::new(), Vec::new())
+  }
+
+  /// `queue_message` with files (in this app's container, or `blake3:…`
+  /// in the node's store) and threads and efforts attached (design
+  /// §2.27). `false` also when a scope's kind is not one.
+  pub fn queue_message_with(
+    &self,
+    thread: String,
+    id: u64,
+    text: String,
+    attachments: Vec<String>,
+    scopes: Vec<ScopeRef>,
+  ) -> bool {
+    let Ok(scopes) = scope_targets(scopes) else {
+      return false;
+    };
     self.to_chat(
       &thread,
       Request::Interject {
         id,
         text,
-        attachments: Vec::new(),
+        attachments,
+        scopes,
       },
     )
   }

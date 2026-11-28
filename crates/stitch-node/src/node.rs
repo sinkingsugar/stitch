@@ -6379,14 +6379,17 @@ where
         id,
         text,
         attachments,
+        scopes,
       } => {
-        // An attachment that cannot be read leaves the message unwoven:
-        // the client sends it after, and hears why then.
+        // An attachment that cannot be read, or a scope that names no
+        // thread, leaves the message unwoven: the client sends it after,
+        // and hears why then.
         let atts: Result<Vec<_>> = attachments
           .iter()
           .map(|p| attachment_arg(s, p))
           .collect();
-        if let Ok(attachments) = atts {
+        let scope = crate::scopes::scoped(s, &scopes).await;
+        if let (Ok(attachments), Ok(scope)) = (atts, scope) {
           steer.push(chat::Interjection {
             id: Some(id),
             from: None,
@@ -6396,7 +6399,7 @@ where
             untold: None,
             asker: None,
             relayed: None,
-            scope: None,
+            scope,
           });
         }
         return Ok(None);

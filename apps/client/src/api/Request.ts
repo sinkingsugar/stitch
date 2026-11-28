@@ -165,7 +165,11 @@ upto: string | null, last: number | null, no_attachments: boolean, no_tools: boo
 /**
  * Files on this machine, read by the node, or images in its blob store (`blake3:…`).
  */
-attachments: Array<string>, } } | { "Retract": { id: number, } } | "Interrupt" | { "ShellAttach": { id: string, } } | { "ShellInput": Array<number> } | "Jobs" | { "StopJob": { id: string, } } | { "Approval": { id: number, allow: boolean, 
+attachments: Array<string>, 
+/**
+ * Threads and efforts attached (design §2.27), as `Chat`'s.
+ */
+scopes: Array<ScopeTarget>, } } | { "Retract": { id: number, } } | "Interrupt" | { "ShellAttach": { id: string, } } | { "ShellInput": Array<number> } | "Jobs" | { "StopJob": { id: string, } } | { "Approval": { id: number, allow: boolean, 
 /**
  * Why, when declining: given to the model.
  */
@@ -222,4 +226,4 @@ scopes: Array<ScopeTarget>, mode?: string | null, hop_cap?: number | null,
 /**
  * Dollars the room's participants may spend on its turns, together.
  */
-budget_usd?: number | null, } } | { "RoomInfo": { thread: string, } } | { "RoomUpdate": { thread: string, add: Array<RoomParticipantSpec>, remove: Array<string>, mute: Array<string>, unmute: Array<string>, mode?: string | null, hop_cap?: number | null, } } | { "Event": { topic: string, payload: string, ask?: EventAsk | null, wait: boolean, } } | { "EventStatus": { id: string, wait_ms: number, } } | { "Events": { input: string, cwd: string | null, } } | { "Share": { thread: string, effort: boolean, level: string, preview: boolean, confirm?: string | null, } } | { "Import": { bundle: Array<number>, preview: boolean, } };
+budget_usd?: number | null, } } | { "RoomInfo": { thread: string, } } | { "RoomUpdate": { thread: string, add: Array<RoomParticipantSpec>, remove: Array<string>, mute: Array<string>, unmute: Array<string>, mode?: string | null, hop_cap?: number | null, } } | { "Event": { topic: string, payload: string, ask?: EventAsk | null, wait: boolean, } } | { "EventStatus": { id: string, wait_ms: number, } } | { "Events": { input: string, cwd: string | null, } } | { "Share": { thread: string, effort: boolean, level: string, preview: boolean, confirm?: string | null, } } | { "Import": { bundle: Array<number>, preview: boolean, } } | { "SyncRepo": { peer: string, repo: string, } };

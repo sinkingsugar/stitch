@@ -1854,7 +1854,12 @@ async fn event_loop(mut store: Store, default_model: String) -> Result<()> {
           }
           Action::Interject { id, text, attachments } => {
             if let Some(c) = &to_chat {
-              let _ = c.send(Request::Interject { id, text, attachments });
+              let _ = c.send(Request::Interject {
+                id,
+                text,
+                attachments,
+                scopes: Vec::new(),
+              });
             }
           }
           Action::Retract(id) => {

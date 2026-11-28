@@ -1499,6 +1499,406 @@ async fn an_interjection_for_another_node_goes_into_its_running_turn() {
   mac_node.stop().await.unwrap();
 }
 
+fn thread_scope(id: &str) -> stitch_node::api::ScopeTarget {
+  stitch_node::api::ScopeTarget {
+    kind: stitch_records::ScopeKind::Thread,
+    id: id.into(),
+  }
+}
+
+/// The user's entries of a thread's transcript, as clients read them.
+async fn user_entries(c: &mut Client, thread: &str) -> Vec<Value> {
+  let Reply::Lines(l) = c
+    .request(&Request::Transcript {
+      thread: thread.into(),
+      after: None,
+      before: None,
+      tail: None,
+    })
+    .await
+    .unwrap()
+  else {
+    panic!()
+  };
+  let read: Value = serde_json::from_str(&l[0]).unwrap();
+  read["entries"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter(|e| e["kind"] == "user")
+    .cloned()
+    .collect()
+}
+
+/// The user entry whose text holds `text`, with its scope chips' IDs.
+fn chips_of(users: &[Value], text: &str) -> Vec<String> {
+  let e = users
+    .iter()
+    .find(|e| e["text"].as_str().is_some_and(|t| t.contains(text)))
+    .unwrap_or_else(|| panic!("no {text}: {users:?}"));
+  e["scopes"]
+    .as_array()
+    .map(|a| {
+      a.iter()
+        .filter_map(|s| s["id"].as_str().map(str::to_owned))
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Gio, 2026-11-28: a message woven into a running turn lost the threads
+/// attached to it (design §2.27). Here, for a detached loop and a chat's:
+/// sent to interject, queued on the chat's own connection, and typed by
+/// another client (relayed into the loop); each carries its briefing to
+/// the model and its chips to clients, and its files.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_woven_into_a_running_turn_keep_their_scopes_and_files() {
+  let dir = tempfile::tempdir().unwrap();
+  let (node, mut c, sent) = alone(
+    dir.path(),
+    vec![
+      ("NOTE", vec![answer("Notes taken.")]),
+      ("BOSS", vec![answer("Boss here.")]),
+      (
+        "WORK",
+        vec![
+          format!("SLOW {}", tool_call("w1", "wait", json!({}))),
+          format!("SLOW {}", tool_call("w2", "wait", json!({}))),
+          answer("WORK done."),
+        ],
+      ),
+      (
+        "TALK",
+        vec![
+          format!("SLOW {}", tool_call("t1", "wait", json!({}))),
+          format!("SLOW {}", tool_call("t2", "wait", json!({}))),
+          format!("SLOW {}", tool_call("t3", "wait", json!({}))),
+          answer("TALK done."),
+        ],
+      ),
+    ],
+  )
+  .await;
+  let data = dir.path().join("node");
+  let note = chat_thread(&mut c, "NOTE: the release notes").await;
+  let boss = chat_thread(&mut c, "BOSS: plan the release").await;
+  let file = dir.path().join("queued.txt");
+  std::fs::write(&file, "QUEUED-FILE-CONTENT").unwrap();
+  let file2 = dir.path().join("relayed.txt");
+  std::fs::write(&file2, "RELAYED-FILE-CONTENT").unwrap();
+
+  // A detached loop, sent a message to interject with a thread attached.
+  let Reply::Detached(work) = c
+    .request(&detach_global("WORK: prepare the release", &boss))
+    .await
+    .unwrap()
+  else {
+    panic!()
+  };
+  until("the work to start", || !of(&sent, "WORK").is_empty()).await;
+  let Reply::Lines(lines) = c
+    .request(&Request::Send {
+      thread: work.clone(),
+      text: "SENT with the notes".into(),
+      from: None,
+      keep: false,
+      interject: true,
+      scopes: vec![thread_scope(&note)],
+    })
+    .await
+    .unwrap()
+  else {
+    panic!()
+  };
+  assert!(
+    lines[0].contains("woven into its running turn"),
+    "{lines:?}"
+  );
+  until("the work to end", || of(&sent, "WORK").len() >= 3).await;
+  let last = texts(&of(&sent, "WORK")[2]).join("\n");
+  assert!(last.contains("SENT with the notes"), "{last}");
+  assert!(
+    last.contains("<scope>") && last.contains(&format!("thread:{note}")),
+    "the woven message carries its briefing: {last}"
+  );
+
+  // A chat's loop: one message queued on its own connection with a file
+  // and a thread, one sent to interject, one typed by another client.
+  let (to_chat, outgoing) = tokio::sync::mpsc::unbounded_channel();
+  let mut talk = Client::connect(&data).await.unwrap();
+  let (said, thread_of) = (
+    Arc::new(Mutex::new(Vec::<Reply>::new())),
+    Arc::new(Mutex::new(None::<String>)),
+  );
+  let chat = {
+    let (said, thread_of) = (said.clone(), thread_of.clone());
+    let file = file.display().to_string();
+    let note = note.clone();
+    tokio::spawn(async move {
+      let mut queued = false;
+      talk
+        .chat_with(
+          &global_chat(None, "TALK: write the changelog"),
+          Some(outgoing),
+          |r| {
+            if let Reply::Thread(t) = r {
+              thread_of.lock().unwrap().get_or_insert(t.clone());
+            }
+            if matches!(r, Reply::ToolCall(_)) && !queued {
+              queued = true;
+              to_chat
+                .send(Request::Interject {
+                  id: 7,
+                  text: "QUEUED with a file".into(),
+                  attachments: vec![file.clone()],
+                  scopes: vec![thread_scope(&note)],
+                })
+                .unwrap();
+            }
+            said.lock().unwrap().push(r.clone());
+            None
+          },
+        )
+        .await
+        .unwrap()
+    })
+  };
+  // Its thread is written with its first step.
+  until("the chat's first step", || {
+    thread_of.lock().unwrap().is_some() && of(&sent, "TALK").len() >= 2
+  })
+  .await;
+  let talk_id = thread_of.lock().unwrap().clone().unwrap();
+  let Reply::Lines(lines) = c
+    .request(&Request::Send {
+      thread: talk_id.clone(),
+      text: "INTERJECTED with the notes".into(),
+      from: None,
+      keep: false,
+      interject: true,
+      scopes: vec![thread_scope(&note)],
+    })
+    .await
+    .unwrap()
+  else {
+    panic!()
+  };
+  assert!(
+    lines[0].contains("woven into its running turn"),
+    "{lines:?}"
+  );
+  let relayed = {
+    let data = data.clone();
+    let (talk_id, note) = (talk_id.clone(), note.clone());
+    let file2 = file2.display().to_string();
+    tokio::spawn(async move {
+      let mut other = Client::connect(&data).await.unwrap();
+      let mut req = global_chat(Some(talk_id), "RELAYED with a file");
+      if let Request::Chat {
+        attachments,
+        scopes,
+        ..
+      } = &mut req
+      {
+        *attachments = vec![file2];
+        *scopes = vec![thread_scope(&note)];
+      }
+      other.chat(&req, |_| None).await.unwrap()
+    })
+  };
+  let done = chat.await.unwrap();
+  assert!(matches!(done, Reply::ChatDone { .. }), "{done:?}");
+  let _ = relayed.await.unwrap();
+  let bodies = of(&sent, "TALK");
+  let raw = serde_json::to_string(bodies.last().unwrap()).unwrap();
+  for (what, text) in [
+    ("queued", "QUEUED with a file"),
+    ("interjected", "INTERJECTED with the notes"),
+    ("relayed", "RELAYED with a file"),
+  ] {
+    assert!(raw.contains(text), "{what} message not woven: {raw}");
+  }
+  assert!(
+    raw.contains("QUEUED-FILE-CONTENT"),
+    "the queued message's file: {raw}"
+  );
+  assert!(
+    raw.contains("RELAYED-FILE-CONTENT"),
+    "the relayed message's file: {raw}"
+  );
+  assert_eq!(
+    raw.matches(&format!("thread:{note}")).count(),
+    3,
+    "each woven message carries its briefing: {raw}"
+  );
+  assert!(
+    said
+      .lock()
+      .unwrap()
+      .iter()
+      .any(|r| matches!(r, Reply::Woven(ids) if ids.contains(&7))),
+    "the queued message was said woven"
+  );
+
+  // Clients see the chips.
+  let users = user_entries(&mut c, &work).await;
+  assert_eq!(chips_of(&users, "SENT with the notes"), vec![note.clone()]);
+  let users = user_entries(&mut c, &talk_id).await;
+  for text in [
+    "QUEUED with a file",
+    "INTERJECTED with the notes",
+    "RELAYED with a file",
+  ] {
+    assert_eq!(chips_of(&users, text), vec![note.clone()], "{text}");
+  }
+
+  c.request(&Request::Stop).await.unwrap();
+  node.wait().await.unwrap();
+}
+
+/// The same for a thread another node runs (Gio's case: typed on one
+/// node into a thread whose turn runs on another), its scopes a thread
+/// the node running it has not synced yet and one made there, which the
+/// node it is typed on has not (refused as "no thread … here" before: the
+/// picker lists it, the message did not go): sent to interject, and typed
+/// as a chat (`elsewhere::chat`, the web client's and the app's).
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_woven_into_a_turn_on_another_node_keep_their_scopes() {
+  let dir = tempfile::tempdir().unwrap();
+  let d = dir.path();
+  let (phone_api, _phone_sent) = keyed(vec![
+    (
+      "TALK",
+      vec![
+        tool_call(
+          "t1",
+          "spawn",
+          json!({"node": "mac", "goal": "JOB: count the open issues"}),
+        ),
+        answer("The Mac counts them."),
+      ],
+    ),
+    ("NOTE", vec![answer("Notes taken.")]),
+  ])
+  .await;
+  let (mac_api, mac_sent) = keyed(vec![
+    (
+      "JOB",
+      vec![
+        format!("SLOW {}", tool_call("j1", "wait", json!({}))),
+        format!("SLOW {}", tool_call("j2", "wait", json!({}))),
+        format!("SLOW {}", tool_call("j3", "wait", json!({}))),
+        format!("SLOW {}", tool_call("j4", "wait", json!({}))),
+        answer("JOB: 12 open."),
+      ],
+    ),
+    ("MNOTE", vec![answer("Mac notes taken.")]),
+  ])
+  .await;
+  let (phone, mac) = (d.join("phone"), d.join("mac"));
+  let (phone_port, mac_port) = (free_port(), free_port());
+  config(&phone, "phone", phone_port, &phone_api);
+  config(&mac, "mac", mac_port, &mac_api);
+  let home = RecordRoot::init(&d.join("phone-home"), "home".parse().unwrap(), Role::Home).unwrap();
+  Index::open(&phone.join("index.sqlite"))
+    .unwrap()
+    .refresh(&home)
+    .unwrap();
+  let phone_node = stitch_node::start(&phone).await.unwrap();
+  let mut p = Client::connect(&phone).await.unwrap();
+  let Reply::Ticket(ticket) = p.request(&Request::Invite { ttl_secs: 60 }).await.unwrap() else {
+    panic!()
+  };
+  join(&mac, "mac", mac_port, &ticket.parse().unwrap()).await;
+  let mac_node = stitch_node::start(&mac).await.unwrap();
+
+  let mut results = Vec::new();
+  let Reply::ChatDone { .. } = p
+    .chat(&global_chat(None, "TALK: have the Mac count"), |r| {
+      if let Reply::ToolResult { output, .. } = r {
+        results.push(output.clone());
+      }
+      None
+    })
+    .await
+    .unwrap()
+  else {
+    panic!()
+  };
+  let spawned = results
+    .iter()
+    .find_map(|r| r.strip_prefix("Spawned thread "))
+    .and_then(|r| r.split_whitespace().next())
+    .unwrap_or_else(|| panic!("{results:?}"))
+    .to_owned();
+  until("the Mac to start", || !of(&mac_sent, "JOB").is_empty()).await;
+  // The phone reads the thread the Mac writes.
+  let phone_index = Index::open(&phone.join("index.sqlite")).unwrap();
+  for _ in 0..100 {
+    p.request(&Request::Sync { peer: None }).await.unwrap();
+    if phone_index
+      .record(&spawned.parse().unwrap())
+      .unwrap()
+      .is_some()
+    {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  // A thread made on the phone just now: the Mac has not synced it; and
+  // one made on the Mac, which the phone has not.
+  let note = chat_thread(&mut p, "NOTE: the release notes").await;
+  let mut m = Client::connect(&mac).await.unwrap();
+  let mnote = chat_thread(&mut m, "MNOTE: the Mac's notes").await;
+  let both = vec![thread_scope(&note), thread_scope(&mnote)];
+
+  let Reply::Lines(lines) = p
+    .request(&Request::Send {
+      thread: spawned.clone(),
+      text: "SENT with the notes".into(),
+      from: None,
+      keep: false,
+      interject: true,
+      scopes: both.clone(),
+    })
+    .await
+    .unwrap()
+  else {
+    panic!()
+  };
+  assert!(lines[0].contains("on mac: passed on"), "{lines:?}");
+  // Typed into it on the phone, which has it run on the Mac.
+  p.request(&run_on(&spawned, Some("mac"))).await.unwrap();
+  let typed = {
+    let phone = phone.clone();
+    let (spawned, both) = (spawned.clone(), both.clone());
+    tokio::spawn(async move {
+      let mut other = Client::connect(&phone).await.unwrap();
+      let mut req = global_chat(Some(spawned), "TYPED with the notes");
+      if let Request::Chat { scopes, .. } = &mut req {
+        *scopes = both;
+      }
+      other.chat(&req, |_| None).await
+    })
+  };
+  until("the Mac's turn to end", || of(&mac_sent, "JOB").len() >= 5).await;
+  let _ = typed.await.unwrap();
+  let raw = serde_json::to_string(of(&mac_sent, "JOB").last().unwrap()).unwrap();
+  assert!(raw.contains("SENT with the notes"), "{raw}");
+  assert!(raw.contains("TYPED with the notes"), "{raw}");
+  for t in [&note, &mnote] {
+    assert_eq!(
+      raw.matches(&format!("thread:{t}")).count(),
+      2,
+      "each message woven there carries its briefing of {t}: {raw}"
+    );
+  }
+
+  p.request(&Request::Stop).await.unwrap();
+  phone_node.wait().await.unwrap();
+  mac_node.stop().await.unwrap();
+}
+
 /// The threads a node's index holds out of memory: those whose latest
 /// `{ thread, remember }` fact says `remember = false`.
 fn out_of_memory(data: &Path) -> Vec<String> {

@@ -545,6 +545,9 @@ pub enum Request {
     text: String,
     /// Files on this machine, read by the node, or images in its blob store (`blake3:…`).
     attachments: Vec<String>,
+    /// Threads and efforts attached (design §2.27), as `Chat`'s.
+    #[serde(default)]
+    scopes: Vec<ScopeTarget>,
   },
   /// On a chat's connection: takes back a message not woven yet.
   Retract {
@@ -1964,6 +1967,10 @@ mod wire_tests {
         id: 1,
         text: s("x"),
         attachments: strs(),
+        scopes: vec![ScopeTarget {
+          kind: stitch_records::ScopeKind::Thread,
+          id: s("t"),
+        }],
       },
       Retract { id: 1 },
       Interrupt,

@@ -606,6 +606,7 @@ async fn a_chat_waiting_for_another_turn_is_woven_into_it_with_what_was_queued()
                 id: 1,
                 text: "queued one".into(),
                 attachments: Vec::new(),
+                scopes: Vec::new(),
               });
             }
             Reply::Woven(ids) => woven.extend(ids.iter().copied()),

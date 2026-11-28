@@ -1137,6 +1137,7 @@ async fn messages_sent_while_it_works_are_woven_in_after_the_tools() {
                 id,
                 text,
                 attachments: vec![],
+                scopes: vec![],
               })
               .unwrap();
           }
@@ -1231,6 +1232,7 @@ async fn an_interrupt_stops_the_command_and_the_model() {
               id: 1,
               text: "late".into(),
               attachments: vec![],
+              scopes: vec![],
             })
             .unwrap();
         });
@@ -4858,6 +4860,7 @@ async fn a_woven_message_survives_the_next_call_failing() {
               id: 1,
               text: "also check the logs".into(),
               attachments: vec![],
+              scopes: vec![],
             })
             .unwrap();
         }
