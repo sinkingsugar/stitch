@@ -685,6 +685,12 @@ impl Config {
         base_url: Some(stitch_providers::gemini::BASE_URL.into()),
         ..ProviderConfig::default()
       }),
+      // The Google Antigravity plan, through Google's `agy` CLI (§2.8,
+      // Antigravity).
+      None if name == ANTIGRAVITY => Some(ProviderConfig {
+        kind: ANTIGRAVITY.into(),
+        ..ProviderConfig::default()
+      }),
       None => None,
     }
   }
@@ -756,6 +762,13 @@ impl Config {
     let Some(cfg) = self.provider_config(provider) else {
       return "none";
     };
+    if cfg.kind == ANTIGRAVITY {
+      return if antigravity_signed_in(data) {
+        "subscription"
+      } else {
+        "none"
+      };
+    }
     if let Some(service) = subscription_service(provider, &cfg)
       && matches!(crate::auth::signed_in(data, service).await, Ok(true))
     {
@@ -770,6 +783,20 @@ impl Config {
 
   /// The provider and model for `model` (`provider/model`, or the default).
   pub fn resolve(&self, data: &Path, model: Option<&str>) -> Result<(Provider, String, String)> {
+    let full = model
+      .or(self.default_model.as_deref())
+      .unwrap_or(DEFAULT_MODEL);
+    // Antigravity's bridge belongs to the data directory, and needs no key.
+    if let Some((name, model)) = full.split_once('/')
+      && let Some(cfg) = self.provider_config(name)
+      && cfg.kind == ANTIGRAVITY
+    {
+      return Ok((
+        antigravity_provider(name, data, cfg.effort)?,
+        name.to_owned(),
+        model.to_owned(),
+      ));
+    }
     self.resolve_using(model, |name, kind| keys::get(data, name, kind))
   }
 
@@ -874,6 +901,31 @@ impl Config {
     };
     Ok((provider, name.to_owned(), model.to_owned()))
   }
+}
+
+/// The kind (and built-in provider) on the Google Antigravity plan.
+pub const ANTIGRAVITY: &str = "antigravity";
+
+#[cfg(not(any(target_os = "ios", target_os = "visionos")))]
+fn antigravity_provider(_name: &str, data: &Path, effort: Option<String>) -> Result<Provider> {
+  Ok(crate::antigravity::provider(data, effort))
+}
+
+#[cfg(any(target_os = "ios", target_os = "visionos"))]
+fn antigravity_provider(name: &str, _data: &Path, _effort: Option<String>) -> Result<Provider> {
+  Err(Error::Config(format!(
+    "provider `{name}`: Antigravity runs on a desktop node (it drives the `agy` CLI)"
+  )))
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "visionos")))]
+fn antigravity_signed_in(data: &Path) -> bool {
+  crate::antigravity::signed_in(data)
+}
+
+#[cfg(any(target_os = "ios", target_os = "visionos"))]
+fn antigravity_signed_in(_data: &Path) -> bool {
+  false
 }
 
 /// `cache_ttl` for OpenAI's API: `30m`, the one value it takes.
@@ -1003,6 +1055,34 @@ mod tests {
     );
     let clean = "default_model = \"x\"\nquick_model = \"y\"\n[shell]\n";
     assert!(unknown_key_warnings(clean).is_empty());
+  }
+
+  #[test]
+  fn antigravity_is_built_in_on_the_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Config::default();
+    c.providers.insert(
+      "antigravity".into(),
+      ProviderConfig {
+        kind: "antigravity".into(),
+        effort: Some("max".into()),
+        ..ProviderConfig::default()
+      },
+    );
+    let (p, name, model) = c
+      .resolve(dir.path(), Some("antigravity/gemini-3.8-flash"))
+      .unwrap();
+    assert_eq!(
+      (p.kind(), name.as_str(), model.as_str()),
+      ("antigravity", "antigravity", "gemini-3.8-flash")
+    );
+    assert!(p.is_subscription() && !p.metered());
+    assert!(p.label().starts_with("Google (Antigravity plan)"));
+    assert!(Config::default().provider_config("antigravity").is_some());
+    assert_eq!(
+      crate::pricing::priced("antigravity/claude-sonnet-4-6", &Default::default(), None),
+      None
+    );
   }
 
   #[test]

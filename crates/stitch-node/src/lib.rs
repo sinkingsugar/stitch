@@ -8,6 +8,8 @@
 //! and while the node runs `node.lock`, `node.sock` and `node.log`.
 
 pub mod actions;
+#[cfg(not(any(target_os = "ios", target_os = "visionos")))]
+pub mod antigravity;
 pub mod api;
 pub mod apns;
 pub mod apps;

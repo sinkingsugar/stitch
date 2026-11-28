@@ -1,0 +1,31 @@
+[package]
+name = "stitch-antigravity"
+description = "A model provider on the Google Antigravity plan: Google's `agy` CLI driven over ACP, Stitch's tools served to it over MCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = "0.23.1"
+blake3 = "1.8.7"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+rand = "0.10"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+stitch-providers = { version = "0.1.0", path = "../stitch-providers" }
+tokio = { version = "1.53.2", features = ["rt", "macros", "net", "io-util", "sync", "time", "process", "fs"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "process", "fs"] }
+
+# Speaks to a fake `agy` (the test binary itself, run with `FAKE_AGY`).
+[[test]]
+name = "bridge"
+harness = false

@@ -7590,6 +7590,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stitch-antigravity"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "blake3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "stitch-providers",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "stitch-cli"
 version = "0.1.0"
 dependencies = [
@@ -7750,6 +7767,7 @@ dependencies = [
  "serde_ignored",
  "serde_json",
  "similar",
+ "stitch-antigravity",
  "stitch-client",
  "stitch-memory",
  "stitch-net",

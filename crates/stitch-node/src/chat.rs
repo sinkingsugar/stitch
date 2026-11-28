@@ -3781,7 +3781,11 @@ impl Run<'_> {
         // The provider's name for the model may not be priced where the one
         // asked for is: then the one asked for (a tool's spend has no such
         // fallback).
-        let priced_as = if pricing::priced(&response.model, &response.usage, usd).is_some() {
+        // A provider that bills no tokens (Antigravity's plan) is not
+        // priced as the model's own maker would be.
+        let priced_as = if !self.provider.metered()
+          || pricing::priced(&response.model, &response.usage, usd).is_some()
+        {
           response.model.as_str()
         } else {
           self.model

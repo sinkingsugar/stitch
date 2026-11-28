@@ -305,6 +305,9 @@ fn counted(
   if cost.is_none() && provider.kind() == "anthropic" && provider.is_subscription() {
     return None;
   }
+  if !provider.metered() {
+    return cost;
+  }
   crate::pricing::priced(model, usage, cost).or_else(|| crate::pricing::priced(full, usage, None))
 }
 
@@ -628,7 +631,9 @@ pub(crate) async fn compaction_bound(s: &Arc<Shared>, thread: &RecordId) -> Resu
       ..Default::default()
     };
     let usd = counted(&provider, full, &name, &usage, None);
-    unpriced |= usd.is_none() && !(provider.kind() == "anthropic" && provider.is_subscription());
+    unpriced |= usd.is_none()
+      && provider.metered()
+      && !(provider.kind() == "anthropic" && provider.is_subscription());
     bound.add(&usage, usd);
   }
   if unpriced {

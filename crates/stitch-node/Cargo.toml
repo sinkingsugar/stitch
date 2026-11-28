@@ -74,6 +74,9 @@ serde_ignored = "0.1.14"
 # What iOS and visionOS cannot have: a Chrome to start, and the `keyring`
 # crate's stores.
 [target.'cfg(not(any(target_os = "ios", target_os = "visionos")))'.dependencies]
+# The Google Antigravity plan through Google's `agy` CLI (design §2.8): a
+# process and a local MCP endpoint, so desktops only.
+stitch-antigravity = { version = "0.1.0", path = "../stitch-antigravity" }
 chromiumoxide = "0.9.1"
 keyring = "4.2.0"
 # The desktop's server of apps (`apps::http`).

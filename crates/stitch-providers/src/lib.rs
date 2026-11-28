@@ -207,6 +207,37 @@ impl Response {
   }
 }
 
+/// A future an [`External`] provider returns.
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// A provider this crate does not implement: one the node builds and
+/// hands in (`Provider::External`), such as a model backend driven
+/// through another program (design §2.8, Antigravity). This crate stays
+/// HTTP only; the process and server machinery lives with the
+/// implementation, out of what the Apple app links.
+pub trait External: Send + Sync + std::fmt::Debug {
+  /// The adapter kind (`antigravity`).
+  fn kind(&self) -> &'static str;
+  /// Who answers and how it is paid for (`Provider::label`).
+  fn label(&self) -> String;
+  /// Whether its calls run on a plan rather than an API key.
+  fn is_subscription(&self) -> bool;
+  /// Whether it can be asked now (signed in, its program installed).
+  fn has_key(&self) -> bool;
+  /// Whether its calls cost money counted per token here: `false` for a
+  /// plan that bills none (no dollar costs are counted for it).
+  fn metered(&self) -> bool {
+    false
+  }
+  fn models(&self) -> BoxFuture<'_, Result<Vec<String>>>;
+  fn context_window<'a>(&'a self, model: &'a str) -> BoxFuture<'a, Result<Option<u64>>>;
+  fn stream<'a>(
+    &'a self,
+    request: &'a Request,
+    on_event: &'a mut (dyn FnMut(Event) + Send),
+  ) -> BoxFuture<'a, Result<Response>>;
+}
+
 /// A configured provider.
 #[derive(Clone, Debug)]
 pub enum Provider {
@@ -214,6 +245,8 @@ pub enum Provider {
   OpenAi(OpenAiCompat),
   Responses(Responses),
   Gemini(Gemini),
+  /// One the node implements and hands in.
+  External(std::sync::Arc<dyn External>),
 }
 
 impl Provider {
@@ -223,14 +256,26 @@ impl Provider {
       Self::Responses(p) => p.account_id.is_some() || p.grok,
       Self::OpenAi(p) => p.grok,
       Self::Gemini(_) => false,
+      Self::External(p) => p.is_subscription(),
     }
   }
+
+  /// Whether its calls are priced per token (every provider but an
+  /// external one on a plan that bills none: Antigravity's).
+  pub fn metered(&self) -> bool {
+    match self {
+      Self::External(p) => p.metered(),
+      _ => true,
+    }
+  }
+
   pub fn kind(&self) -> &'static str {
     match self {
       Provider::Anthropic(_) => anthropic::KIND,
       Provider::OpenAi(_) => openai::KIND,
       Provider::Responses(_) => responses::KIND,
       Provider::Gemini(_) => gemini::KIND,
+      Provider::External(p) => p.kind(),
     }
   }
 
@@ -239,6 +284,7 @@ impl Provider {
   /// what ran out (`Error::OutOfUsage`).
   pub fn label(&self) -> String {
     let (who, plan) = match self {
+      Provider::External(p) => return p.label(),
       Provider::Anthropic(p) if !p.claude => ("Moonshot", ""),
       Provider::Anthropic(_) => ("Anthropic", "Claude subscription"),
       Provider::Responses(p) if p.grok => ("xAI", "Grok subscription"),
@@ -270,6 +316,7 @@ impl Provider {
       Provider::Responses(p) => !p.api_key.is_empty(),
       Provider::OpenAi(p) => p.api_key.as_ref().is_some_and(|k| !k.is_empty()),
       Provider::Gemini(p) => !p.api_key.is_empty(),
+      Provider::External(p) => p.has_key(),
     }
   }
 
@@ -280,7 +327,7 @@ impl Provider {
       Provider::OpenAi(p) => p.tokens.as_ref(),
       Provider::Responses(p) => p.tokens.as_ref(),
       // An API key only: no subscription.
-      Provider::Gemini(_) => None,
+      Provider::Gemini(_) | Provider::External(_) => None,
     }
   }
 
@@ -292,6 +339,8 @@ impl Provider {
       Provider::OpenAi(p) => p.api_key = Some(token),
       Provider::Responses(p) => p.api_key = token,
       Provider::Gemini(p) => p.api_key = token,
+      // Its credentials are its own.
+      Provider::External(_) => {}
     }
     p
   }
@@ -311,6 +360,7 @@ impl Provider {
       Provider::OpenAi(p) => p.models().await,
       Provider::Responses(p) => p.models().await,
       Provider::Gemini(p) => p.models().await,
+      Provider::External(p) => p.models().await,
     }
   }
 
@@ -321,6 +371,7 @@ impl Provider {
       Provider::OpenAi(p) => p.context_window(model).await,
       Provider::Responses(p) => p.context_window(model).await,
       Provider::Gemini(p) => p.context_window(model).await,
+      Provider::External(p) => p.context_window(model).await,
     }
   }
 
@@ -371,6 +422,7 @@ impl Provider {
       Provider::OpenAi(p) => p.stream(request, on_event).await,
       Provider::Responses(p) => p.stream(request, on_event).await,
       Provider::Gemini(p) => p.stream(request, on_event).await,
+      Provider::External(p) => p.stream(request, on_event).await,
     }
   }
 }

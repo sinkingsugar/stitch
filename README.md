@@ -41,8 +41,8 @@ through real shells, tools and other agents, and brings back what needs you.
   type-checked before they run, with their effects (network, files, time)
   known up front.
 - **Many providers.** Anthropic, OpenAI and Grok (API keys or your
-  subscription), Gemini, OpenRouter, Ollama, llama.cpp and other
-  OpenAI-compatible endpoints.
+  subscription), Gemini, Google's Antigravity plan (through its `agy` CLI),
+  OpenRouter, Ollama, llama.cpp and other OpenAI-compatible endpoints.
 - **Memory.** Optional on-device semantic memory (EmbeddingGemma 2 through
   llama.cpp, with [engram](https://github.com/sinkingsugar/engram)) that
   recalls what earlier conversations learned.
@@ -157,6 +157,7 @@ The [documentation index](docs/README.md) lists everything. To start:
 | `stitch-net` | The node-to-node protocol over iroh: sync, blobs, pairing, trust |
 | `stitch-node` | The node: config, credentials, the agent loop and tools, the client protocol |
 | `stitch-providers` | Model providers over HTTP and server-sent events |
+| `stitch-antigravity` | The Antigravity plan as a model provider: Google's `agy` over ACP, Stitch's tools to it over MCP |
 | `stitch-shell` | Interactive shell sessions on PTYs, and the sandbox |
 | `stitch-ssh` | SSH connections and remote sessions |
 | `stitch-memory` | Memory: engram over EmbeddingGemma 2 |

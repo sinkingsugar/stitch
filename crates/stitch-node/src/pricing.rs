@@ -126,6 +126,10 @@ pub fn priced(model: &str, u: &Usage, usd: Option<f64>) -> Option<f64> {
   if usd.is_some() {
     return usd;
   }
+  // A plan that bills no tokens, whatever its models' names elsewhere.
+  if model.starts_with("antigravity/") {
+    return None;
+  }
   let name = model.rsplit('/').next().unwrap_or(model);
   if let Some(e) = estimate(name, u) {
     return Some(e);

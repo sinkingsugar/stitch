@@ -550,6 +550,11 @@ enum Command {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
   },
+  /// The PreToolUse hook the `antigravity` provider gives Google's `agy`
+  /// (not for typing): the call as JSON on standard input, the decision
+  /// printed; only Stitch's own tools (served over MCP) pass.
+  #[command(name = "antigravity-hook", hide = true)]
+  AntigravityHook,
   /// Memory: what was said and seen, recalled across conversations.
   #[command(subcommand)]
   Memory(MemoryCommand),
@@ -5199,6 +5204,9 @@ fn run(cli: Cli) -> Result<()> {
       if !ok {
         std::process::exit(1);
       }
+    }
+    Command::AntigravityHook => {
+      stitch_node::antigravity::hook();
     }
     Command::BrowserHost { args: _ } => {
       let data = data_dir(&cli)?;

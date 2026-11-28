@@ -5252,6 +5252,10 @@ const MODELS_FOR: Duration = Duration::from_secs(600);
 /// while the node runs (the app's settings, `stitch auth`) shows at once.
 async fn models(s: &Arc<Shared>) -> Reply {
   let mut cached = s.models.lock().await;
+  // Configured ones, `antigravity` among them when `[providers.antigravity]`
+  // is set: its sign-in is agy's, in the user's home rather than the data
+  // directory, so it is listed only where a node opts in (`antigravity/…`
+  // resolves everywhere).
   let mut names: Vec<String> = s.config.providers.keys().cloned().collect();
   for n in [
     "anthropic",
