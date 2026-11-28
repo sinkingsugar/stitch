@@ -14,10 +14,12 @@
 //! that never saw the session) starts a fresh session with the earlier
 //! conversation as a transcript (`sync`).
 //!
-//! agy runs in a home of its own (`<data>/antigravity/home`), with only
-//! the sign-in token linked from the user's, a PreToolUse hook that
-//! refuses agy's own tools (`hook`), and the MCP configuration that names
-//! Stitch's endpoint and its tools as eager.
+//! One agy process per tool set, each in a home of its own
+//! (`<data>/antigravity/procs/<key>`): a PreToolUse hook that refuses
+//! agy's own tools (`hook`), and the MCP configuration naming exactly that
+//! set as eager; its `.gemini/antigravity-cli` is the shared one
+//! (`<data>/antigravity/home`: the sign-in token linked from the user's,
+//! agy's conversations), so a session moves between processes.
 
 mod acp;
 mod errors;
@@ -25,19 +27,20 @@ pub mod hook;
 mod mcp;
 pub mod sync;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use stitch_providers::{
   BoxFuture, Content, Error, Event, External, Message, Request, Response, Result, Role, StopReason,
-  Usage,
+  ToolDef, Usage,
 };
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
-use acp::{AgyProc, RpcError, Spawn};
+use acp::{AgyProc, Busy, RpcError, Spawn};
 use mcp::{Mcp, Router, SessionEvent, ToolAnswer};
 use sync::{Block, Plan};
 
@@ -48,6 +51,11 @@ pub const HOOK_SUBCOMMAND: &str = "antigravity-hook";
 /// How long agy waits on one of Stitch's tools: a day (a detached thread's
 /// call may wait on the user's approval). agy's own default is 3 minutes.
 const TOOL_TIMEOUT_SECS: u64 = 86_400;
+/// agy processes at most, one per tool set (more only while every one has
+/// a turn under way).
+const MAX_PROCS: usize = 4;
+/// A process with no turn under way is stopped after this long unused.
+const IDLE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Where the bridge keeps its things and how it starts agy.
 #[derive(Clone, Debug)]
@@ -303,6 +311,36 @@ struct Catalog {
   any_window: Option<u64>,
 }
 
+/// A process and the tool set it serves.
+struct Slot {
+  key: String,
+  proc: Arc<AgyProc>,
+  used: Instant,
+}
+
+/// The key of a tool set: its names and schemas, in name order, so a
+/// changed schema is another set.
+fn tool_key(tools: &[ToolDef]) -> String {
+  let mut sorted: Vec<&ToolDef> = tools.iter().collect();
+  sorted.sort_by(|a, b| a.name.cmp(&b.name));
+  let mut h = blake3::Hasher::new();
+  for t in sorted {
+    h.update(t.name.as_bytes());
+    h.update(b"\0");
+    h.update(t.input_schema.to_string().as_bytes());
+    h.update(b"\0");
+  }
+  h.finalize().to_hex()[..16].to_owned()
+}
+
+fn io_error(p: &Path, e: std::io::Error) -> Error {
+  protocol(format!("{}: {e}", p.display()))
+}
+
+fn write_json(p: PathBuf, v: Value) -> Result<()> {
+  std::fs::write(&p, serde_json::to_vec_pretty(&v).expect("json")).map_err(|e| io_error(&p, e))
+}
+
 /// The call agy waits on.
 struct Pending {
   call: String,
@@ -325,8 +363,9 @@ struct ThreadState {
   /// fresh.
   dirty: bool,
   pending: Option<Pending>,
-  /// An agy prompt runs (streaming or waiting on a call).
-  in_turn: bool,
+  /// An agy prompt runs (streaming or waiting on a call), counted in its
+  /// process.
+  in_turn: Option<Busy>,
   /// The model and thought level set on the open session.
   set: Option<(String, Option<String>)>,
 }
@@ -335,7 +374,8 @@ pub struct Bridge {
   opts: Options,
   router: Arc<Router>,
   mcp: tokio::sync::OnceCell<(Arc<Mcp>, u16)>,
-  current: tokio::sync::Mutex<Option<Arc<AgyProc>>>,
+  procs: tokio::sync::Mutex<Vec<Slot>>,
+  reaping: OnceLock<()>,
   threads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<ThreadState>>>>,
   catalog: Mutex<Catalog>,
   saved: Mutex<BTreeMap<String, Saved>>,
@@ -367,7 +407,7 @@ impl Drop for Turn {
       p.notify("session/cancel", json!({"sessionId": s}));
     }
     self.st.dirty = true;
-    self.st.in_turn = false;
+    self.st.in_turn = None;
     self.st.pending = None;
     self.bridge.save(&self.st);
   }
@@ -390,7 +430,8 @@ impl Bridge {
       opts,
       router: Arc::new(Router::default()),
       mcp: tokio::sync::OnceCell::new(),
-      current: tokio::sync::Mutex::new(None),
+      procs: tokio::sync::Mutex::new(Vec::new()),
+      reaping: OnceLock::new(),
       threads: Mutex::new(HashMap::new()),
       catalog: Mutex::new(Catalog::default()),
       saved: Mutex::new(saved),
@@ -436,7 +477,7 @@ impl Bridge {
           Saved {
             session: s.clone(),
             synced: st.synced.clone(),
-            clean: !st.dirty && !st.in_turn,
+            clean: !st.dirty && st.in_turn.is_none(),
           },
         );
       }
@@ -492,108 +533,181 @@ impl Bridge {
       .cloned()
   }
 
-  /// agy's home: the token linked, the workspace trusted, the hook, and
-  /// the MCP configuration with `eager` tools.
-  fn write_home(&self, eager: &BTreeSet<String>, port: u16, token: &str) -> Result<()> {
-    let home = self.home();
-    let cli = home.join(".gemini/antigravity-cli");
-    let config = home.join(".gemini/config");
-    let io = |p: &Path, e: std::io::Error| protocol(format!("{}: {e}", p.display()));
-    for d in [&cli, &config, &self.work()] {
-      std::fs::create_dir_all(d).map_err(|e| io(d, e))?;
+  /// What every process shares: the sign-in token linked, the scratch
+  /// workspace trusted, and so agy's conversations (a session made in one
+  /// process resumes in another), all in `home/.gemini/antigravity-cli`.
+  fn write_shared(&self) -> Result<PathBuf> {
+    let cli = self.home().join(".gemini/antigravity-cli");
+    for d in [&cli, &self.work()] {
+      std::fs::create_dir_all(d).map_err(|e| io_error(d, e))?;
     }
     let link = cli.join("antigravity-oauth-token");
     if std::fs::read_link(&link).ok().as_deref() != Some(self.opts.token.as_path()) {
       let _ = std::fs::remove_file(&link);
       #[cfg(unix)]
-      std::os::unix::fs::symlink(&self.opts.token, &link).map_err(|e| io(&link, e))?;
+      std::os::unix::fs::symlink(&self.opts.token, &link).map_err(|e| io_error(&link, e))?;
     }
-    let write = |p: PathBuf, v: Value| {
-      std::fs::write(&p, serde_json::to_vec_pretty(&v).expect("json")).map_err(|e| io(&p, e))
-    };
-    write(
+    write_json(
       cli.join("settings.json"),
       json!({"trustedWorkspaces": [self.work()]}),
     )?;
-    write(
+    Ok(cli)
+  }
+
+  /// The home of the process for the tool set `key`: its own
+  /// `.gemini/config` (the hook, and the MCP configuration naming exactly
+  /// `tools` as eager, at `/mcp/<key>`), `.gemini/antigravity-cli` the
+  /// shared one. agy reads both from `$HOME`, once, when it starts.
+  fn write_home(&self, key: &str, tools: &[ToolDef], port: u16, token: &str) -> Result<PathBuf> {
+    let shared = self.write_shared()?;
+    let home = self.opts.dir.join("procs").join(key);
+    let config = home.join(".gemini/config");
+    std::fs::create_dir_all(&config).map_err(|e| io_error(&config, e))?;
+    let link = home.join(".gemini/antigravity-cli");
+    if std::fs::read_link(&link).ok().as_deref() != Some(shared.as_path()) {
+      let _ = std::fs::remove_file(&link);
+      #[cfg(unix)]
+      std::os::unix::fs::symlink(&shared, &link).map_err(|e| io_error(&link, e))?;
+    }
+    write_json(
       config.join("hooks.json"),
       json!({"stitch-gate": {"PreToolUse": [{"matcher": "*", "hooks": [
         {"type": "command", "command": self.opts.hook, "timeout": 10}
       ]}]}}),
     )?;
-    let tools: serde_json::Map<String, Value> = eager
+    let eager: serde_json::Map<String, Value> = tools
       .iter()
-      .map(|n| (n.clone(), json!({"eager": true})))
+      .map(|t| (t.name.clone(), json!({"eager": true})))
       .collect();
-    write(
+    write_json(
       config.join("mcp_config.json"),
       json!({"mcpServers": {mcp::SERVER: {
-        "url": format!("http://127.0.0.1:{port}/mcp"),
+        "url": format!("http://127.0.0.1:{port}/mcp/{key}"),
         "headers": {mcp::TOKEN_HEADER: token},
         "timeoutSeconds": TOOL_TIMEOUT_SECS,
-        "tools": tools,
+        "tools": eager,
       }}}),
-    )
+    )?;
+    Ok(home)
   }
 
-  /// The process new sessions open in, started (again) when there is
-  /// none, it died, or it does not have every tool of `needs` as eager.
-  /// A process replaced stays while sessions in it are under way.
-  async fn current(&self, needs: &BTreeSet<String>) -> Result<Arc<AgyProc>> {
+  /// The process for exactly `tools`, started when there is none or it
+  /// died. At most `MAX_PROCS`: to start one more, the one used longest
+  /// ago that has no turn under way is stopped (none such: one more runs
+  /// until the reaper finds some idle).
+  async fn proc_for(&self, tools: &[ToolDef]) -> Result<Arc<AgyProc>> {
     self.ready()?;
     let (mcp, port) = self.mcp().await?;
-    let mut current = self.current.lock().await;
-    if let Some(p) = &*current
-      && p.alive()
-      && needs.is_subset(&p.eager)
-    {
-      return Ok(p.clone());
+    let key = tool_key(tools);
+    mcp.offer(&key, tools);
+    let mut procs = self.procs.lock().await;
+    procs.retain(|s| s.proc.alive());
+    if let Some(s) = procs.iter_mut().find(|s| s.key == key) {
+      s.used = Instant::now();
+      return Ok(s.proc.clone());
     }
-    let eager: BTreeSet<String> = mcp
-      .names()
-      .into_iter()
-      .chain(needs.iter().cloned())
-      .collect();
-    self.write_home(&eager, port, &mcp.token)?;
+    let mut stopped = Vec::new();
+    while procs.len() >= MAX_PROCS {
+      let Some(i) = procs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.proc.busy())
+        .min_by_key(|(_, s)| s.used)
+        .map(|(i, _)| i)
+      else {
+        break;
+      };
+      stopped.push(procs.remove(i));
+    }
+    let home = self.write_home(&key, tools, port, &mcp.token)?;
     let log = self.opts.dir.join("agy.log");
     let spawned = AgyProc::spawn(
       Spawn {
         program: &self.opts.program,
         args: &self.opts.args,
-        home: &self.home(),
+        home: &home,
         cwd: &self.work(),
         env: &self.opts.env,
         log: &log,
-        eager,
       },
       self.router.clone(),
     )
     .await
     .map_err(|e| protocol(format!("{e}; its log: {}", log.display())))?;
-    let old = current.replace(spawned.clone());
-    drop(current);
-    if old.is_some() {
-      // Idle threads let go of the old process; one under way keeps it
-      // until its turn ends.
-      let threads: Vec<_> = self
-        .threads
-        .lock()
-        .expect("threads lock")
-        .values()
-        .cloned()
-        .collect();
-      for t in threads {
-        if let Ok(mut st) = t.try_lock()
-          && !st.in_turn
-          && st.proc.is_some()
-        {
-          st.proc = None;
-          st.tx = None;
-          st.rx = None;
-        }
+    procs.push(Slot {
+      key,
+      proc: spawned.clone(),
+      used: Instant::now(),
+    });
+    drop(procs);
+    self.let_go(&stopped);
+    Ok(spawned)
+  }
+
+  /// Idle threads let go of processes stopped (the last holder of one
+  /// stops it); a thread in another step keeps its own until it moves.
+  fn let_go(&self, stopped: &[Slot]) {
+    if stopped.is_empty() {
+      return;
+    }
+    let threads: Vec<_> = self
+      .threads
+      .lock()
+      .expect("threads lock")
+      .values()
+      .cloned()
+      .collect();
+    for t in threads {
+      if let Ok(mut st) = t.try_lock()
+        && st.in_turn.is_none()
+        && st
+          .proc
+          .as_ref()
+          .is_some_and(|p| stopped.iter().any(|s| Arc::ptr_eq(p, &s.proc)))
+      {
+        st.proc = None;
+        st.tx = None;
+        st.rx = None;
       }
     }
-    Ok(spawned)
+  }
+
+  /// Stops the processes idle for `IDLE`, every minute, while the bridge
+  /// lives.
+  fn reap(self: &Arc<Self>) {
+    if self.reaping.set(()).is_err() {
+      return;
+    }
+    let weak = Arc::downgrade(self);
+    tokio::spawn(async move {
+      loop {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let Some(bridge) = weak.upgrade() else { return };
+        bridge.reap_now(IDLE).await;
+      }
+    });
+  }
+
+  /// Stops the processes with no turn under way, unused for `idle`.
+  pub async fn reap_now(&self, idle: std::time::Duration) {
+    let mut procs = self.procs.lock().await;
+    let (stopped, kept): (Vec<Slot>, Vec<Slot>) = std::mem::take(&mut *procs)
+      .into_iter()
+      .partition(|s| !s.proc.alive() || (!s.proc.busy() && s.used.elapsed() >= idle));
+    *procs = kept;
+    drop(procs);
+    self.let_go(&stopped);
+  }
+
+  /// How many agy processes run (tests).
+  pub async fn processes(&self) -> usize {
+    self
+      .procs
+      .lock()
+      .await
+      .iter()
+      .filter(|s| s.proc.alive())
+      .count()
   }
 
   fn learn(&self, options: Option<&Value>) {
@@ -627,7 +741,7 @@ impl Bridge {
     if let Some(m) = self.catalog.lock().expect("catalog lock").models.clone() {
       return Ok(m);
     }
-    let proc = self.current(&BTreeSet::new()).await?;
+    let proc = self.proc_for(&[]).await?;
     let r = proc
       .request("session/new", json!({"cwd": self.work(), "mcpServers": []}))
       .await
@@ -661,9 +775,7 @@ impl Bridge {
       return Err(protocol("a request with no messages"));
     }
     self.ready()?;
-    let (mcp, _) = self.mcp().await?;
-    mcp.offer(&req.tools);
-    let needs: BTreeSet<String> = req.tools.iter().map(|t| t.name.clone()).collect();
+    self.reap();
     let (key, persist) = match &req.cache_key {
       Some(k) => (k.clone(), true),
       None => (anonymous_key(req), false),
@@ -696,7 +808,7 @@ impl Bridge {
       }
     }
     if let Plan::Prompt(blocks) = &plan {
-      if self.open(&mut turn.st, &needs, req, &level).await? {
+      if self.open(&mut turn.st, req, &level).await? {
         self.prompt(&mut turn, blocks);
         turn.st.synced = fps.clone();
       } else {
@@ -716,16 +828,16 @@ impl Bridge {
         eprintln!("antigravity {key}: a fresh session ({why})");
       }
       self.abandon(&mut turn.st);
-      self.new_session(&mut turn.st, &needs, req, &level).await?;
+      self.new_session(&mut turn.st, req, &level).await?;
       self.prompt(&mut turn, blocks);
       turn.st.synced = fps;
     }
     self.save(&turn.st);
-    let names: HashSet<String> = needs.into_iter().collect();
+    let names: HashSet<String> = req.tools.iter().map(|t| t.name.clone()).collect();
     let out = self.run(&mut turn, &names, &req.model, on_event).await;
     // A one-off request (no thread) leaves no session open once answered.
     if !turn.st.persist
-      && !turn.st.in_turn
+      && turn.st.in_turn.is_none()
       && let Some(session) = turn.st.session.take()
     {
       if let Some(p) = turn.st.proc.take() {
@@ -741,7 +853,7 @@ impl Bridge {
   /// Leaves the session as it is: a prompt under way cancelled, a waiting
   /// call let go.
   fn abandon(&self, st: &mut ThreadState) {
-    if st.in_turn
+    if st.in_turn.is_some()
       && let (Some(p), Some(s)) = (&st.proc, &st.session)
     {
       p.notify("session/cancel", json!({"sessionId": s}));
@@ -750,7 +862,7 @@ impl Bridge {
       self.router.remove(s);
     }
     st.pending = None;
-    st.in_turn = false;
+    st.in_turn = None;
     st.tx = None;
     st.rx = None;
   }
@@ -762,20 +874,20 @@ impl Bridge {
     st.rx = Some(rx);
   }
 
-  /// The thread's session open in the current process (resumed there if
+  /// The thread's session open in the process of the request's tools
+  /// (resumed there if
   /// it is elsewhere or was never open in this node's run), its model set;
   /// false when it cannot be resumed.
   async fn open(
     &self,
     st: &mut ThreadState,
-    needs: &BTreeSet<String>,
     req: &Request,
     level: &Option<String>,
   ) -> Result<bool> {
     let Some(session) = st.session.clone() else {
       return Ok(false);
     };
-    let current = self.current(needs).await?;
+    let current = self.proc_for(&req.tools).await?;
     let here = st
       .proc
       .as_ref()
@@ -812,11 +924,10 @@ impl Bridge {
   async fn new_session(
     &self,
     st: &mut ThreadState,
-    needs: &BTreeSet<String>,
     req: &Request,
     level: &Option<String>,
   ) -> Result<()> {
-    let proc = self.current(needs).await?;
+    let proc = self.proc_for(&req.tools).await?;
     let mut params = json!({"cwd": self.work(), "mcpServers": []});
     if let Some(system) = req.system.as_deref().filter(|s| !s.trim().is_empty()) {
       params["_meta"] = json!({"antigravity": {"systemPrompt": {"append": system}}});
@@ -912,7 +1023,7 @@ impl Bridge {
         .unwrap_or_else(|_| Err(RpcError::gone("agy exited")));
       let _ = tx.send(SessionEvent::Done(r));
     });
-    turn.st.in_turn = true;
+    turn.st.in_turn = Some(Busy::new(proc.clone()));
     turn.armed = true;
   }
 
@@ -939,7 +1050,7 @@ impl Bridge {
         .await
       else {
         turn.armed = false;
-        turn.st.in_turn = false;
+        turn.st.in_turn = None;
         turn.st.dirty = true;
         self.save(&turn.st);
         return Err(protocol("agy's session closed"));
@@ -1017,7 +1128,7 @@ impl Bridge {
         }
         SessionEvent::Done(r) => {
           turn.armed = false;
-          turn.st.in_turn = false;
+          turn.st.in_turn = None;
           let r = match r {
             Ok(r) => r,
             Err(e) => {

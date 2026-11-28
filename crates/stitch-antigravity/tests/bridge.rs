@@ -40,6 +40,9 @@ fn main() {
       Box::pin(a_rewind_starts_a_fresh_session())
     }),
     ("errors_are_errors", || Box::pin(errors_are_errors())),
+    ("processes_are_bounded_and_reaped", || {
+      Box::pin(processes_are_bounded_and_reaped())
+    }),
     ("tests_never_see_the_users_sign_in", || {
       Box::pin(tests_never_see_the_users_sign_in())
     }),
@@ -110,7 +113,9 @@ impl Env {
 
   /// What the fake was asked, in order: `(method, params)`.
   fn log(&self) -> Vec<(String, Value)> {
-    let path = self.data.join("antigravity/home/fake.jsonl");
+    let path = self
+      .data
+      .join("antigravity/home/.gemini/antigravity-cli/fake.jsonl");
     std::fs::read_to_string(path)
       .unwrap_or_default()
       .lines()
@@ -122,6 +127,35 @@ impl Env {
         )
       })
       .collect()
+  }
+
+  /// The tool lists each process got, in order.
+  fn listed(&self) -> Vec<Value> {
+    self
+      .log()
+      .into_iter()
+      .filter(|(m, _)| m == "mcp/tools")
+      .map(|(_, p)| p)
+      .collect()
+  }
+
+  /// The configuration directory of the process whose tools include `tool`.
+  fn config_dir_with(&self, tool: &str) -> PathBuf {
+    std::fs::read_dir(self.data.join("antigravity/procs"))
+      .unwrap()
+      .map(|e| e.unwrap().path().join(".gemini/config"))
+      .find(|d| {
+        std::fs::read_to_string(d.join("mcp_config.json"))
+          .is_ok_and(|t| t.contains(&format!("\"{tool}\"")))
+      })
+      .unwrap()
+  }
+
+  fn config_with(&self, tool: &str) -> Value {
+    serde_json::from_slice(
+      &std::fs::read(self.config_dir_with(tool).join("mcp_config.json")).unwrap(),
+    )
+    .unwrap()
   }
 
   fn count(&self, method: &str) -> usize {
@@ -375,7 +409,8 @@ async fn sessions_outlive_the_node_and_new_tools_restart_agy() {
   assert_eq!(env.count("session/new"), 1);
   assert_eq!(env.count("session/resume"), 1);
   assert_eq!(env.count("initialize"), 2);
-  // A new tool: agy started again with it eager; the session resumed there.
+  // Another tool set: a process of its own, listing exactly that set; the
+  // session made in the first resumed there.
   m.push(reply(&r));
   m.push(user("call new_tool {}"));
   let r = ask(&p, &request(&m, &["echo_tool", "new_tool"]))
@@ -385,35 +420,64 @@ async fn sessions_outlive_the_node_and_new_tools_restart_agy() {
   assert_eq!(r.stop, StopReason::ToolUse);
   assert_eq!(env.count("initialize"), 3);
   assert_eq!(env.count("session/resume"), 2);
-  let config: Value = serde_json::from_slice(
-    &std::fs::read(
-      env
-        .data
-        .join("antigravity/home/.gemini/config/mcp_config.json"),
-    )
-    .unwrap(),
-  )
-  .unwrap();
+  assert_eq!(env.count("session/new"), 1);
+  assert_eq!(
+    env.listed().last().unwrap(),
+    &json!(["echo_tool", "new_tool"])
+  );
+  let config = env.config_with("new_tool");
   let server = &config["mcpServers"]["stitch"];
-  assert_eq!(server["tools"]["new_tool"]["eager"], true);
+  assert_eq!(server["tools"]["echo_tool"]["eager"], true);
   assert_eq!(server["timeoutSeconds"], 86_400);
-  let listed = env
-    .log()
-    .into_iter()
-    .rev()
-    .find(|(m, _)| m == "mcp/tools")
-    .unwrap()
-    .1;
-  assert_eq!(listed, json!(["echo_tool", "new_tool"]));
+  assert!(server["url"].as_str().unwrap().contains("/mcp/"));
+  // Another thread with another set sees only its own tools.
+  let mut other = request(&[user("hi")], &["other_tool"]);
+  other.cache_key = Some("thread-2".into());
+  ask(&p, &other).await.0.unwrap();
+  assert_eq!(env.listed().last().unwrap(), &json!(["other_tool"]));
   // agy's home: the token linked, the hook gating every tool.
   let home = env.data.join("antigravity/home/.gemini");
   assert_eq!(
     std::fs::read_link(home.join("antigravity-cli/antigravity-oauth-token")).unwrap(),
     env.opts.token
   );
-  let hooks: Value =
-    serde_json::from_slice(&std::fs::read(home.join("config/hooks.json")).unwrap()).unwrap();
+  let hooks: Value = serde_json::from_slice(
+    &std::fs::read(env.config_dir_with("new_tool").join("hooks.json")).unwrap(),
+  )
+  .unwrap();
   assert_eq!(hooks["stitch-gate"]["PreToolUse"][0]["matcher"], "*");
+}
+
+async fn processes_are_bounded_and_reaped() {
+  let env = Env::new();
+  let bridge = Arc::new(Bridge::new(env.opts.clone()));
+  let p = env.provider_of(bridge.clone());
+  // Six threads, six tool sets: never more than four processes idle.
+  let mut firsts = Vec::new();
+  for i in 0..6 {
+    let mut r = request(&[user("hi")], &[&format!("tool_{i}")]);
+    r.cache_key = Some(format!("set-{i}"));
+    firsts.push(ask(&p, &r).await.0.unwrap());
+    assert!(bridge.processes().await <= 4);
+  }
+  assert_eq!(bridge.processes().await, 4);
+  // One with a held call is never stopped.
+  let mut held = request(&[user("call tool_9 {}")], &["tool_9"]);
+  held.cache_key = Some("held".into());
+  let r = ask(&p, &held).await.0.unwrap();
+  assert_eq!(r.stop, StopReason::ToolUse);
+  bridge.reap_now(Duration::ZERO).await;
+  assert_eq!(bridge.processes().await, 1, "the held one stays");
+  // The thread whose process was stopped resumes in a new one.
+  let mut again = request(&[user("hi")], &["tool_0"]);
+  again.cache_key = Some("set-0".into());
+  again.messages.push(reply(&firsts[0]));
+  again.messages.push(user("more"));
+  let (before, resumed) = (env.count("session/new"), env.count("session/resume"));
+  let r = ask(&p, &again).await.0.unwrap();
+  assert_eq!(r.text(), "echo: more");
+  assert_eq!(env.count("session/new"), before);
+  assert_eq!(env.count("session/resume"), resumed + 1);
 }
 
 /// The fake `agy acp`.
@@ -456,9 +520,11 @@ mod fake {
       let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(self.home.join("fake.jsonl"))
+        .open(self.home.join(".gemini/antigravity-cli/fake.jsonl"))
         .unwrap();
-      writeln!(f, "{}", json!({"method": method, "params": params})).unwrap();
+      // One write, so the lines of processes writing at once never mix.
+      let line = format!("{}\n", json!({"method": method, "params": params}));
+      f.write_all(line.as_bytes()).unwrap();
     }
     fn update(&self, session: &str, update: Value) {
       self.send(json!({"jsonrpc": "2.0", "method": "session/update",
@@ -471,7 +537,7 @@ mod fake {
       );
     }
     fn sessions(&self) -> Vec<String> {
-      std::fs::read_to_string(self.home.join("fake-sessions"))
+      std::fs::read_to_string(self.home.join(".gemini/antigravity-cli/fake-sessions"))
         .unwrap_or_default()
         .lines()
         .map(str::to_owned)
@@ -485,10 +551,8 @@ mod fake {
       .unwrap();
       let server = &config["mcpServers"]["stitch"];
       let url = server["url"].as_str().unwrap();
-      let addr = url
-        .trim_start_matches("http://")
-        .trim_end_matches("/mcp")
-        .to_owned();
+      let (addr, path) = url.trim_start_matches("http://").split_once('/').unwrap();
+      let (addr, path) = (addr.to_owned(), format!("/{path}"));
       let mut headers = String::new();
       for (k, v) in server["headers"].as_object().unwrap() {
         headers.push_str(&format!("{k}: {}\r\n", v.as_str().unwrap()));
@@ -499,7 +563,7 @@ mod fake {
       let body = body.to_string();
       let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
       let req = format!(
-        "POST /mcp HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\n{headers}content-length: {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
       );
       stream.write_all(req.as_bytes()).await.unwrap();
@@ -649,7 +713,11 @@ mod fake {
           );
           let mut all = fake.sessions();
           all.push(sid.clone());
-          std::fs::write(fake.home.join("fake-sessions"), all.join("\n")).unwrap();
+          std::fs::write(
+            fake.home.join(".gemini/antigravity-cli/fake-sessions"),
+            all.join("\n"),
+          )
+          .unwrap();
           fake.send(ok(json!({"sessionId": sid, "configOptions": options()})));
         }
         "session/resume" => {

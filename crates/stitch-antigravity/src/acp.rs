@@ -1,10 +1,10 @@
 //! One `agy acp` process: JSON-RPC over its standard input and output
 //! (the Agent Client Protocol), its updates routed to their sessions.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,17 +65,30 @@ pub struct Spawn<'a> {
   pub cwd: &'a Path,
   pub env: &'a [(String, String)],
   pub log: &'a Path,
-  /// The tools its configuration marks eager.
-  pub eager: BTreeSet<String>,
 }
 
 pub struct AgyProc {
   wire: Arc<Wire>,
   next: AtomicU64,
-  /// The tools it was started with, as eager (agy reads its MCP
-  /// configuration once, at start).
-  pub eager: BTreeSet<String>,
+  /// Turns under way in it (`Busy`): it is never stopped meanwhile.
+  busy: AtomicUsize,
   child: Mutex<Option<tokio::process::Child>>,
+}
+
+/// A turn under way in a process, counted there while it lives.
+pub struct Busy(Arc<AgyProc>);
+
+impl Busy {
+  pub fn new(proc: Arc<AgyProc>) -> Busy {
+    proc.busy.fetch_add(1, Ordering::SeqCst);
+    Busy(proc)
+  }
+}
+
+impl Drop for Busy {
+  fn drop(&mut self) {
+    self.0.busy.fetch_sub(1, Ordering::SeqCst);
+  }
 }
 
 impl std::fmt::Debug for AgyProc {
@@ -139,7 +152,7 @@ impl AgyProc {
     let proc = Arc::new(AgyProc {
       wire,
       next: AtomicU64::new(1),
-      eager: s.eager,
+      busy: AtomicUsize::new(0),
       child: Mutex::new(Some(child)),
     });
     proc
@@ -154,6 +167,11 @@ impl AgyProc {
       .await
       .map_err(|e| format!("agy did not start: {e}"))?;
     Ok(proc)
+  }
+
+  /// Whether a turn is under way in it.
+  pub fn busy(&self) -> bool {
+    self.busy.load(Ordering::SeqCst) > 0
   }
 
   pub fn alive(&self) -> bool {

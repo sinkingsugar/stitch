@@ -6,7 +6,7 @@
 //! it as the step's tool call; the HTTP request stays open until the
 //! node's loop has run the tool and the next model call brings its result.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 
@@ -77,9 +77,9 @@ impl Router {
 
 pub struct Mcp {
   pub token: String,
-  /// Every tool the node's requests have offered, by name (the last
-  /// definition of each): agy lists them once per process.
-  tools: Mutex<BTreeMap<String, ToolDef>>,
+  /// The tool sets processes serve, by key (`/mcp/<key>`): each agy
+  /// process lists exactly its own, once, when it starts.
+  sets: Mutex<HashMap<String, Vec<ToolDef>>>,
   router: Arc<Router>,
   /// Calls agy may cancel, by `<Mcp-Session-Id> <JSON-RPC id>`.
   inflight: Mutex<HashMap<String, oneshot::Sender<()>>>,
@@ -89,34 +89,26 @@ impl Mcp {
   pub fn new(token: String, router: Arc<Router>) -> Mcp {
     Mcp {
       token,
-      tools: Mutex::new(BTreeMap::new()),
+      sets: Mutex::new(HashMap::new()),
       router,
       inflight: Mutex::new(HashMap::new()),
     }
   }
 
-  /// Adds `tools` to those served; true when a name is new.
-  pub fn offer(&self, tools: &[ToolDef]) -> bool {
-    let mut known = self.tools.lock().expect("tools lock");
-    let mut grew = false;
-    for t in tools {
-      grew |= known.insert(t.name.clone(), t.clone()).is_none();
-    }
-    grew
-  }
-
-  pub fn names(&self) -> Vec<String> {
+  /// Serves `tools` as the set `key` (`/mcp/<key>`), sorted by name.
+  pub fn offer(&self, key: &str, tools: &[ToolDef]) {
+    let mut tools = tools.to_vec();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
     self
-      .tools
+      .sets
       .lock()
-      .expect("tools lock")
-      .keys()
-      .cloned()
-      .collect()
+      .expect("sets lock")
+      .insert(key.to_owned(), tools);
   }
 
-  /// The answer to one JSON-RPC message (`None` for a notification).
-  pub async fn handle(&self, session: &str, msg: &Value) -> Option<Value> {
+  /// The answer to one JSON-RPC message to the set `set` (`None` for a
+  /// notification).
+  pub async fn handle(&self, set: &str, session: &str, msg: &Value) -> Option<Value> {
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let Some(id) = msg.get("id").cloned() else {
@@ -142,10 +134,12 @@ impl Mcp {
       "ping" => Ok(json!({})),
       "tools/list" => {
         let tools: Vec<Value> = self
-          .tools
+          .sets
           .lock()
-          .expect("tools lock")
-          .values()
+          .expect("sets lock")
+          .get(set)
+          .into_iter()
+          .flatten()
           .map(|t| {
             let mut schema = t.input_schema.clone();
             if schema.get("type").is_none()
@@ -256,9 +250,11 @@ async fn respond(mcp: &Mcp, req: hyper::Request<Incoming>) -> hyper::Response<Fu
     .get(TOKEN_HEADER)
     .and_then(|v| v.to_str().ok())
     .is_some_and(|t| t == mcp.token);
-  if !req.uri().path().starts_with("/mcp") {
-    return reply(404, Bytes::new(), None);
-  }
+  let set = match req.uri().path().strip_prefix("/mcp") {
+    Some("") | Some("/") => String::new(),
+    Some(rest) if rest.starts_with('/') => rest[1..].to_owned(),
+    _ => return reply(404, Bytes::new(), None),
+  };
   if !authorized {
     return reply(401, Bytes::new(), None);
   }
@@ -288,13 +284,13 @@ async fn respond(mcp: &Mcp, req: hyper::Request<Incoming>) -> hyper::Response<Fu
     Value::Array(batch) => {
       let mut out = Vec::new();
       for m in batch {
-        if let Some(a) = mcp.handle(&session, m).await {
+        if let Some(a) = mcp.handle(&set, &session, m).await {
           out.push(a);
         }
       }
       (!out.is_empty()).then_some(Value::Array(out))
     }
-    m => mcp.handle(&session, m).await,
+    m => mcp.handle(&set, &session, m).await,
   };
   match answer {
     Some(a) => reply(200, Bytes::from(a.to_string()), new.as_deref()),
@@ -319,10 +315,11 @@ mod tests {
       description: format!("does {n}"),
       input_schema: json!({"properties": {}}),
     };
-    assert!(m.offer(&[tool("b"), tool("a")]));
-    assert!(!m.offer(&[tool("a")]));
+    m.offer("k1", &[tool("b"), tool("a")]);
+    m.offer("k2", &[tool("c")]);
     let discover = m
       .handle(
+        "k1",
         "s",
         &json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover"}),
       )
@@ -331,6 +328,7 @@ mod tests {
     assert_eq!(discover["error"]["code"], -32601);
     let init = m
       .handle(
+        "k1",
         "s",
         &json!({"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}}),
       )
@@ -340,6 +338,7 @@ mod tests {
     assert!(init["result"]["capabilities"]["tools"].is_object());
     assert!(
       m.handle(
+        "k1",
         "s",
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
       )
@@ -348,6 +347,7 @@ mod tests {
     );
     let list = m
       .handle(
+        "k1",
         "s",
         &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}),
       )
@@ -356,7 +356,17 @@ mod tests {
     let tools = list["result"]["tools"].as_array().unwrap();
     assert_eq!(tools[0]["name"], "a");
     assert_eq!(tools[0]["inputSchema"]["type"], "object");
-    assert_eq!(m.names(), ["a", "b"]);
+    assert_eq!(tools.len(), 2, "its own set only");
+    let other = m
+      .handle(
+        "k2",
+        "s",
+        &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
+      )
+      .await
+      .unwrap();
+    assert_eq!(other["result"]["tools"][0]["name"], "c");
+    assert_eq!(other["result"]["tools"].as_array().unwrap().len(), 1);
   }
 
   #[tokio::test]
@@ -369,7 +379,7 @@ mod tests {
       "name": "shell_run", "arguments": {"command": "ls"},
       "_meta": {"antigravity.google/conversation_id": "conv-1"}}});
     let m2 = m.clone();
-    let pending = tokio::spawn(async move { m2.handle("s", &call).await.unwrap() });
+    let pending = tokio::spawn(async move { m2.handle("k1", "s", &call).await.unwrap() });
     let Some(SessionEvent::Call { name, input, reply }) = rx.recv().await else {
       panic!("no call");
     };
@@ -391,9 +401,10 @@ mod tests {
     let call = json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {
       "name": "x", "_meta": {"antigravity.google/conversation_id": "conv-1"}}});
     let m2 = m.clone();
-    let pending = tokio::spawn(async move { m2.handle("s", &call).await.unwrap() });
+    let pending = tokio::spawn(async move { m2.handle("k1", "s", &call).await.unwrap() });
     let _held = rx.recv().await;
     m.handle(
+      "k1",
       "s",
       &json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 5}}),
     )
@@ -404,6 +415,7 @@ mod tests {
     // A conversation nobody waits on.
     let out = m
       .handle(
+        "k1",
         "s",
         &json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {
           "name": "x", "_meta": {"antigravity.google/conversation_id": "nobody"}}}),
