@@ -1,8 +1,9 @@
 //! Context windows and usage, so that Stitch compacts a thread before agy
 //! would (design §2.8, Antigravity: Stitch owns compaction).
 //!
-//! agy's windows (its `usage_update` `size`, 1.5.19): Gemini's 1,048,576,
-//! Claude's 250,000, GPT-OSS's 131,072. It compacts a conversation on its
+//! agy's windows (its `usage_update` `size`, 1.5.19): Gemini's 1,048,576
+//! (4 and its orchestrators too), Claude 4.x's 250,000 and Claude 5.5's
+//! 1,000,000, GPT-OSS's 131,072. It compacts a conversation on its
 //! own at a limit below that, set by the server (its embedded defaults
 //! name limits of 80k to 840k), which `agy acp` does not say and its
 //! settings cannot turn off. So the window told to Stitch is a guess at
@@ -23,6 +24,8 @@ use stitch_providers::Usage;
 pub fn known_size(model: &str) -> Option<u64> {
   if model.starts_with("gemini") {
     Some(1_048_576)
+  } else if model.starts_with("claude-opus-5") || model.starts_with("claude-sonnet-5") {
+    Some(1_000_000)
   } else if model.starts_with("claude") {
     Some(250_000)
   } else if model.starts_with("gpt-oss") {
@@ -132,6 +135,11 @@ mod tests {
     assert_eq!(known_size("gemini-4-hydrogen"), Some(1_048_576));
     assert_eq!(known_size("claude-opus-4-6-thinking"), Some(250_000));
     assert_eq!(known_size("gpt-oss-120b-medium"), Some(131_072));
+    assert_eq!(known_size("gemini-4-neon"), Some(1_048_576));
+    assert_eq!(known_size("gemini-pro-orchestrator"), Some(1_048_576));
+    assert_eq!(known_size("claude-opus-5-5"), Some(1_000_000));
+    assert_eq!(known_size("claude-sonnet-5-5"), Some(1_000_000));
+    assert_eq!(compaction_guess(1_000_000), 512_000);
     assert_eq!(known_size("other"), None);
     assert_eq!(compaction_guess(1_048_576), 512_000);
     assert_eq!(compaction_guess(250_000), 160_000);

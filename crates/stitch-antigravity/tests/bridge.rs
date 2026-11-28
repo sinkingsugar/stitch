@@ -39,6 +39,9 @@ fn main() {
     ("a_rewind_starts_a_fresh_session", || {
       Box::pin(a_rewind_starts_a_fresh_session())
     }),
+    ("the_model_list_is_refreshed_when_stale", || {
+      Box::pin(the_model_list_is_refreshed_when_stale())
+    }),
     ("errors_are_errors", || Box::pin(errors_are_errors())),
     ("stitch_owns_compaction", || {
       Box::pin(stitch_owns_compaction())
@@ -580,6 +583,40 @@ async fn a_rewind_starts_a_fresh_session() {
   assert_eq!(env.count("session/new"), 2);
 }
 
+async fn the_model_list_is_refreshed_when_stale() {
+  let env = Env::new();
+  let file = env
+    .data
+    .join("antigravity/home/.gemini/antigravity-cli/fake-models");
+  let first =
+    || Arc::new(Bridge::new(env.opts.clone()).with_models_ttl(Duration::from_millis(300)));
+  let bridge = first();
+  assert_eq!(bridge.models().await.unwrap(), ["fake-pro", "fake-flash"]);
+  // The plan changes: fresh, the old list is served without asking.
+  std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+  std::fs::write(&file, "gemini-4-neon,claude-opus-5-5").unwrap();
+  assert_eq!(bridge.models().await.unwrap(), ["fake-pro", "fake-flash"]);
+  // Stale: asked again.
+  tokio::time::sleep(Duration::from_millis(400)).await;
+  assert_eq!(
+    bridge.models().await.unwrap(),
+    ["gemini-4-neon", "claude-opus-5-5"]
+  );
+  // Stale and agy answers without models: the old list stays.
+  std::fs::write(&file, "").unwrap();
+  tokio::time::sleep(Duration::from_millis(400)).await;
+  let kept = bridge.models().await.unwrap();
+  assert_eq!(kept, ["gemini-4-neon", "claude-opus-5-5"]);
+  // A new list again; and with no old list, a failure is an error.
+  std::fs::write(&file, "gemini-4-argon").unwrap();
+  tokio::time::sleep(Duration::from_millis(400)).await;
+  assert_eq!(bridge.models().await.unwrap(), ["gemini-4-argon"]);
+  let mut broken = env.opts.clone();
+  broken.program = env.data.join("no-such-agy");
+  let b2 = Bridge::new(broken).with_models_ttl(Duration::from_millis(1));
+  assert!(b2.models().await.is_err(), "no old list, no answer");
+}
+
 async fn errors_are_errors() {
   let env = Env::new();
   let p = env.provider();
@@ -934,10 +971,28 @@ mod fake {
     }
   }
 
+  /// The models the fake offers: `fake-models` in its home (comma
+  /// separated) when there is one.
+  fn offered() -> Vec<String> {
+    let path = std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+      .join(".gemini/antigravity-cli/fake-models");
+    match std::fs::read_to_string(path) {
+      Ok(t) => t
+        .split(',')
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty())
+        .collect(),
+      Err(_) => vec!["fake-pro".into(), "fake-flash".into()],
+    }
+  }
+
   fn options() -> Value {
+    let models: Vec<Value> = offered()
+      .iter()
+      .map(|m| json!({"value": m, "name": m}))
+      .collect();
     json!([
-      {"id": "model", "type": "select", "currentValue": "fake-pro",
-       "options": [{"value": "fake-pro", "name": "Pro"}, {"value": "fake-flash", "name": "Flash"}]},
+      {"id": "model", "type": "select", "currentValue": "fake-pro", "options": models},
       {"id": "thought_level", "type": "select", "currentValue": "high",
        "options": [{"value": "low"}, {"value": "high"}]}
     ])

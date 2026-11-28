@@ -31,7 +31,7 @@ pub mod sync;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -308,6 +308,8 @@ struct Saved {
 #[derive(Default)]
 struct Catalog {
   models: Option<Vec<String>>,
+  /// When `models` was learned: the list goes stale (the plan changes).
+  models_at: Option<Instant>,
   /// Its windows (`usage_update`'s `size`), by model.
   sizes: HashMap<String, u64>,
   /// The context it was seen compacting at, by model (`windows.json`).
@@ -379,6 +381,10 @@ struct ThreadState {
   dirty_why: Option<&'static str>,
 }
 
+/// How long agy's model list is served before it is asked again (the
+/// node's own `MODELS_FOR`).
+const MODELS_TTL: Duration = Duration::from_secs(600);
+
 pub struct Bridge {
   opts: Options,
   router: Arc<Router>,
@@ -388,6 +394,8 @@ pub struct Bridge {
   threads: Mutex<HashMap<String, Arc<tokio::sync::Mutex<ThreadState>>>>,
   catalog: Mutex<Catalog>,
   saved: Mutex<BTreeMap<String, Saved>>,
+  /// How long the model list is served before agy is asked again.
+  models_ttl: Duration,
 }
 
 impl std::fmt::Debug for Bridge {
@@ -451,7 +459,14 @@ impl Bridge {
         ..Catalog::default()
       }),
       saved: Mutex::new(saved),
+      models_ttl: MODELS_TTL,
     }
+  }
+
+  /// Another freshness limit for the model list (tests).
+  pub fn with_models_ttl(mut self, ttl: Duration) -> Bridge {
+    self.models_ttl = ttl;
+    self
   }
 
   fn home(&self) -> PathBuf {
@@ -726,9 +741,9 @@ impl Bridge {
       .count()
   }
 
-  fn learn(&self, options: Option<&Value>) {
+  fn learn(&self, options: Option<&Value>) -> bool {
     let Some(options) = options.and_then(Value::as_array) else {
-      return;
+      return false;
     };
     let models: Vec<String> = options
       .iter()
@@ -742,11 +757,18 @@ impl Bridge {
       })
       .unwrap_or_default();
     if !models.is_empty() {
-      self.catalog.lock().expect("catalog lock").models = Some(models);
+      let mut c = self.catalog.lock().expect("catalog lock");
+      c.models = Some(models);
+      c.models_at = Some(Instant::now());
+      return true;
     }
+    false
   }
 
-  /// The models agy offers (`configOptions`' `model` values), asked once.
+  /// The models agy offers (`configOptions`' `model` values). The list
+  /// is served for `models_ttl` (the plan can change under a running
+  /// node), then agy is asked again; when that fails, the old list
+  /// stays.
   pub async fn models(&self) -> Result<Vec<String>> {
     if let Err(e) = self.ready() {
       return Err(match e {
@@ -754,25 +776,36 @@ impl Bridge {
         e => e,
       });
     }
-    if let Some(m) = self.catalog.lock().expect("catalog lock").models.clone() {
-      return Ok(m);
+    let old = {
+      let c = self.catalog.lock().expect("catalog lock");
+      match (&c.models, c.models_at) {
+        (Some(m), Some(at)) if at.elapsed() < self.models_ttl => return Ok(m.clone()),
+        (m, _) => m.clone(),
+      }
+    };
+    match self.ask_models().await {
+      Ok(m) => Ok(m),
+      Err(_) if old.is_some() => Ok(old.unwrap_or_default()),
+      Err(e) => Err(e),
     }
+  }
+
+  /// A throwaway session, for its `configOptions`.
+  async fn ask_models(&self) -> Result<Vec<String>> {
     let proc = self.proc_for(&[]).await?;
     let r = proc
       .request("session/new", json!({"cwd": self.work(), "mcpServers": []}))
       .await
       .map_err(rpc_error)?;
-    self.learn(r.get("configOptions"));
+    let learned = self.learn(r.get("configOptions"));
     if let Some(s) = r.get("sessionId").and_then(Value::as_str) {
       proc.close(s);
     }
-    self
-      .catalog
-      .lock()
-      .expect("catalog lock")
-      .models
-      .clone()
-      .ok_or_else(|| protocol("agy listed no models"))
+    let models = self.catalog.lock().expect("catalog lock").models.clone();
+    match models {
+      Some(m) if learned => Ok(m),
+      _ => Err(protocol("agy listed no models")),
+    }
   }
 
   /// The window Stitch measures `model` against: the context agy was seen
