@@ -789,13 +789,20 @@ impl Bridge {
     let fps = sync::fingerprints(&req.messages);
     let synced = (turn.st.session.is_some() && !turn.st.dirty).then(|| turn.st.synced.clone());
     let waiting = turn.st.pending.as_ref().map(|p| p.call.clone());
-    let mut plan = sync::plan(synced.as_deref(), waiting.as_deref(), &req.messages);
-    if let Plan::Answer { output, is_error } = &plan {
+    let pdfs = sync::reads_pdfs(&req.model);
+    let mut plan = sync::plan(synced.as_deref(), waiting.as_deref(), &req.messages, pdfs);
+    if let Plan::Answer {
+      output,
+      is_error,
+      attached,
+    } = &plan
+    {
       let pending = turn.st.pending.take().expect("a waiting call");
       let alive = turn.st.proc.as_ref().is_some_and(|p| p.alive());
       let answer = ToolAnswer {
         text: output.clone(),
         is_error: *is_error,
+        attached: attached.iter().map(Block::to_acp).collect(),
       };
       if alive && pending.reply.send(answer).is_ok() {
         turn.st.synced = fps.clone();
@@ -1092,6 +1099,7 @@ impl Bridge {
             let _ = reply.send(ToolAnswer {
               text: format!("`{name}` is not one of this thread's tools here."),
               is_error: true,
+              attached: Vec::new(),
             });
             continue;
           }

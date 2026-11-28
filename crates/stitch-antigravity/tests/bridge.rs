@@ -40,6 +40,9 @@ fn main() {
       Box::pin(a_rewind_starts_a_fresh_session())
     }),
     ("errors_are_errors", || Box::pin(errors_are_errors())),
+    ("a_tools_image_goes_back_in_its_result", || {
+      Box::pin(a_tools_image_goes_back_in_its_result())
+    }),
     ("processes_are_bounded_and_reaped", || {
       Box::pin(processes_are_bounded_and_reaped())
     }),
@@ -285,6 +288,55 @@ async fn a_tool_step_goes_through_the_held_call() {
   // The context window agy said.
   assert_eq!(p.context_window("fake-pro").await.unwrap(), Some(500_000));
   assert_eq!(p.models().await.unwrap(), ["fake-pro", "fake-flash"]);
+}
+
+async fn a_tools_image_goes_back_in_its_result() {
+  let env = Env::new();
+  let p = env.provider();
+  let mut m = vec![user("call view_file {\"path\": \"a.png\"}")];
+  let r = ask(&p, &request(&m, &["view_file"])).await.0.unwrap();
+  let (id, ..) = call_of(&r);
+  m.push(reply(&r));
+  m.push(Message::user(vec![Content::ToolResult {
+    id: id.clone(),
+    output: "a.png, 2 by 2".into(),
+    is_error: false,
+  }]));
+  // The node's message of the tool's media, after the results.
+  let png = b"\x89PNG\r\n\x1a\nfake".to_vec();
+  m.push(Message::user(vec![
+    Content::Text(format!("From view_file (call {id}), a.png:")),
+    Content::Text("[image img:0000aaaa]".into()),
+    Content::Image {
+      media_type: "image/png".into(),
+      data: png.clone(),
+    },
+  ]));
+  let r = ask(&p, &request(&m, &["view_file"])).await.0.unwrap();
+  assert_eq!(r.text(), "Result: a.png, 2 by 2");
+  let result = env
+    .log()
+    .into_iter()
+    .find(|(m, _)| m == "mcp/result")
+    .unwrap()
+    .1;
+  let content = result["content"].as_array().unwrap();
+  assert_eq!(content[0], json!({"type": "text", "text": "a.png, 2 by 2"}));
+  assert_eq!(
+    content[1]["text"],
+    format!("From view_file (call {id}), a.png:")
+  );
+  assert_eq!(content[2]["text"], "[image img:0000aaaa]");
+  assert_eq!(content[3]["type"], "image");
+  assert_eq!(content[3]["mimeType"], "image/png");
+  use base64::Engine as _;
+  assert_eq!(
+    base64::engine::general_purpose::STANDARD
+      .decode(content[3]["data"].as_str().unwrap())
+      .unwrap(),
+    png
+  );
+  assert_eq!(result["isError"], false);
 }
 
 async fn a_stopped_turn_is_cancelled_and_starts_fresh() {
@@ -606,6 +658,7 @@ mod fake {
             "_meta": {"antigravity.google/conversation_id": session}}}),
           )
           .await;
+        self.log("mcp/result", &r["result"]);
         let out = r["result"]["content"][0]["text"]
           .as_str()
           .unwrap_or("")

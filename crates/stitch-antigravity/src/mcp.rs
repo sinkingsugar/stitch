@@ -32,6 +32,8 @@ const CONVERSATION: &str = "antigravity.google/conversation_id";
 pub struct ToolAnswer {
   pub text: String,
   pub is_error: bool,
+  /// Content after the text: images, embedded files (MCP's shapes).
+  pub attached: Vec<Value>,
 }
 
 /// What reaches a session's stream.
@@ -208,7 +210,11 @@ impl Mcp {
     };
     self.inflight.lock().expect("inflight lock").remove(&key);
     match answer {
-      Some(a) => result(&a.text, a.is_error),
+      Some(a) => {
+        let mut content = vec![json!({"type": "text", "text": a.text})];
+        content.extend(a.attached);
+        json!({"content": content, "isError": a.is_error})
+      }
       None => result("The call was cancelled.", true),
     }
   }
@@ -391,11 +397,13 @@ mod tests {
       .send(ToolAnswer {
         text: "a b".into(),
         is_error: false,
+        attached: vec![json!({"type": "image", "data": "AAAA", "mimeType": "image/png"})],
       })
       .unwrap();
     let out = pending.await.unwrap();
     assert_eq!(out["result"]["content"][0]["text"], "a b");
     assert_eq!(out["result"]["isError"], false);
+    assert_eq!(out["result"]["content"][1]["type"], "image");
 
     // Cancelled by agy: the call ends at once.
     let call = json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {

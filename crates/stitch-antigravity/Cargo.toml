@@ -23,6 +23,7 @@ tokio = { version = "1.53.2", features = ["rt", "macros", "net", "io-util", "syn
 
 [dev-dependencies]
 tempfile = "3.27.0"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "process", "fs"] }
 
 # Speaks to a fake `agy` (the test binary itself, run with `FAKE_AGY`).

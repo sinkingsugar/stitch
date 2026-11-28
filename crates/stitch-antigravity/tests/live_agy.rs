@@ -102,6 +102,169 @@ async fn another_threads_tools_do_not_reach_this_ones_prompt() {
   assert!(r.text().contains("OK"), "{}", r.text());
 }
 
+/// A 256×256 PNG: a red disc on white.
+fn red_disc() -> Vec<u8> {
+  let img = image::RgbImage::from_fn(256, 256, |x, y| {
+    let (dx, dy) = (x as i32 - 128, y as i32 - 128);
+    if dx * dx + dy * dy < 90 * 90 {
+      image::Rgb([220, 20, 20])
+    } else {
+      image::Rgb([255, 255, 255])
+    }
+  });
+  let mut out = std::io::Cursor::new(Vec::new());
+  img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+  out.into_inner()
+}
+
+/// A one-page PDF saying `text`.
+fn pdf(text: &str) -> Vec<u8> {
+  let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+  let objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+    format!("<< /Length {} >>\nstream\n{stream}\nendstream", stream.len()),
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+  ];
+  let mut out = String::from("%PDF-1.4\n");
+  let mut offsets = Vec::new();
+  for (i, o) in objects.iter().enumerate() {
+    offsets.push(out.len());
+    out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+  }
+  let xref = out.len();
+  out.push_str(&format!(
+    "xref\n0 {}\n0000000000 65535 f \n",
+    objects.len() + 1
+  ));
+  for o in offsets {
+    out.push_str(&format!("{o:010} 00000 n \n"));
+  }
+  out.push_str(&format!(
+    "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+    objects.len() + 1
+  ));
+  out.into_bytes()
+}
+
+/// A tool's step answered with `attached` after its result, as the node
+/// sends it (a message of the tool's media after the results); what the
+/// model then says.
+async fn tool_returns(p: &Provider, key: &str, ask: &str, attached: Vec<Content>) -> String {
+  let mut request = Request::new(model(), vec![user(ask)]);
+  request.cache_key = Some(key.into());
+  request.tools = vec![ToolDef {
+    name: "look".into(),
+    description: "Fetches the item the user means.".into(),
+    input_schema: json!({"type": "object", "properties": {}}),
+  }];
+  let r = p.stream(&request, &mut |_| {}).await.unwrap();
+  assert_eq!(r.stop, StopReason::ToolUse, "{r:?}");
+  let id = r
+    .content
+    .iter()
+    .find_map(|c| match c {
+      Content::ToolCall { id, .. } => Some(id.clone()),
+      _ => None,
+    })
+    .unwrap();
+  request.messages.push(Message {
+    role: Role::Assistant,
+    content: r.content.clone(),
+    native: None,
+  });
+  request
+    .messages
+    .push(Message::user(vec![Content::ToolResult {
+      id: id.clone(),
+      output: "Here it is.".into(),
+      is_error: false,
+    }]));
+  let mut media = vec![Content::Text(format!("From look (call {id}):"))];
+  media.extend(attached);
+  request.messages.push(Message::user(media));
+  let r = p.stream(&request, &mut |_| {}).await.unwrap();
+  assert_eq!(r.stop, StopReason::EndTurn, "{r:?}");
+  r.text()
+}
+
+/// Images and PDFs a tool returns reach the model, through the held call's
+/// MCP result. `STITCH_LIVE_MODEL` picks the model.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "drives the real agy on the Antigravity plan"]
+async fn a_tools_image_and_pdf_reach_the_model() {
+  let dir = tempfile::tempdir().unwrap();
+  let p = live(dir.path());
+  let said = tool_returns(
+    &p,
+    "live-image",
+    "Call the tool look once. Then say what shape and what colour the picture shows, in two words, nothing else.",
+    vec![
+      Content::Text("[image img:0000aaaa]".into()),
+      Content::Image {
+        media_type: "image/png".into(),
+        data: red_disc(),
+      },
+    ],
+  )
+  .await;
+  eprintln!("{}: image in a tool result: {said:?}", model());
+  let l = said.to_lowercase();
+  assert!(
+    l.contains("red") && (l.contains("circle") || l.contains("disc") || l.contains("disk")),
+    "{said}"
+  );
+  let said = tool_returns(
+    &p,
+    "live-pdf",
+    "Call the tool look once: it returns a document. Then reply with the password the document gives, only.",
+    vec![Content::Document {
+      media_type: "application/pdf".into(),
+      name: Some("note.pdf".into()),
+      data: pdf("The password is ZEBRA-42."),
+    }],
+  )
+  .await;
+  eprintln!("{}: PDF in a tool result: {said:?}", model());
+  // Gemini reads PDFs through agy; others get a note naming the file.
+  let reads = model().starts_with("gemini");
+  if reads {
+    assert!(said.contains("ZEBRA-42"), "{said}");
+  }
+  // An image in the user's own message: an ACP image block.
+  let mut r = Request::new(
+    model(),
+    vec![Message::user(vec![
+      Content::Text("What colour is the shape in this picture? One word.".into()),
+      Content::Image {
+        media_type: "image/png".into(),
+        data: red_disc(),
+      },
+    ])],
+  );
+  r.cache_key = Some("live-prompt-image".into());
+  let said = p.stream(&r, &mut |_| {}).await.unwrap().text();
+  eprintln!("{}: image in a prompt: {said:?}", model());
+  assert!(said.to_lowercase().contains("red"), "{said}");
+  // A PDF in the user's own message: agy passes an ACP resource block to
+  // no model, so it goes as a note; printed only.
+  let mut r = Request::new(
+    model(),
+    vec![Message::user(vec![
+      Content::Text("What password does this document give? Reply with it only.".into()),
+      Content::Document {
+        media_type: "application/pdf".into(),
+        name: Some("note.pdf".into()),
+        data: pdf("The password is OTTER-77."),
+      },
+    ])],
+  );
+  r.cache_key = Some("live-prompt-pdf".into());
+  let said = p.stream(&r, &mut |_| {}).await.unwrap().text();
+  eprintln!("{}: PDF in a prompt: {said:?}", model());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "drives the real agy on the Antigravity plan"]
 async fn a_tool_turn_and_a_second_turn_on_the_real_agy() {

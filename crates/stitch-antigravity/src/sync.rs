@@ -31,7 +31,9 @@ pub fn fingerprint(m: &Message) -> u64 {
         .content
         .iter()
         .filter_map(|c| match c {
-          Content::Text(t) => Some(t.as_str()),
+          // The node adds the lines naming images a tool made for the
+          // reply after the turn was returned.
+          Content::Text(t) if !t.starts_with("[image ") => Some(t.as_str()),
           _ => None,
         })
         .collect();
@@ -61,31 +63,128 @@ pub fn fingerprints(messages: &[Message]) -> Vec<u64> {
   messages.iter().map(fingerprint).collect()
 }
 
-/// A block of a prompt (ACP's `ContentBlock`).
+/// A block of a prompt (ACP's `ContentBlock`) or of a tool's result
+/// (MCP's content): the two protocols share these shapes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
   Text(String),
-  Image { media_type: String, data: Vec<u8> },
+  Image {
+    media_type: String,
+    data: Vec<u8>,
+  },
+  /// A file embedded whole (a PDF): a `resource` with its bytes.
+  Document {
+    media_type: String,
+    name: Option<String>,
+    data: Vec<u8>,
+  },
 }
 
 impl Block {
   pub fn to_acp(&self) -> Value {
+    let b64 = |d: &[u8]| base64::engine::general_purpose::STANDARD.encode(d);
     match self {
       Block::Text(t) => json!({"type": "text", "text": t}),
       Block::Image { media_type, data } => json!({
         "type": "image",
         "mimeType": media_type,
-        "data": base64::engine::general_purpose::STANDARD.encode(data),
+        "data": b64(data),
+      }),
+      Block::Document {
+        media_type,
+        name,
+        data,
+      } => json!({
+        "type": "resource",
+        "resource": {
+          "uri": format!("file:///{}", name.as_deref().unwrap_or("attachment")),
+          "mimeType": media_type,
+          "blob": b64(data),
+        },
       }),
     }
   }
+}
+
+/// Whether `model` reads PDFs embedded (`resource` blocks) through agy:
+/// Gemini's do; for others (Claude's) agy saves the file and names its
+/// path, which the model cannot open here (agy's own tools are refused),
+/// so they get the note naming it (checked live, 2026-11-28).
+pub fn reads_pdfs(model: &str) -> bool {
+  model.starts_with("gemini")
+}
+
+/// The node's line naming an image it carries (`[image img:… …]`), and a
+/// tool's label before its images (`From view_file (call c1), …:`).
+fn names_media(t: &str) -> bool {
+  t.starts_with("[image ") || (t.starts_with("From ") && t.contains("(call "))
+}
+
+/// Content that rides with a tool's result: images (and PDFs, `pdfs`)
+/// as blocks, each with the lines naming it; what agy cannot take (another
+/// image type, audio, video) as a note. Other text is returned apart.
+fn split_media(content: &[Content], pdfs: bool) -> (Vec<Block>, Vec<Content>) {
+  let mut blocks = Vec::new();
+  let mut other = Vec::new();
+  let mut labels: Vec<String> = Vec::new();
+  let flush_labels = |labels: &mut Vec<String>, other: &mut Vec<Content>| {
+    other.extend(labels.drain(..).map(Content::Text));
+  };
+  for c in content {
+    match c {
+      Content::Text(t) if names_media(t) => labels.push(t.clone()),
+      Content::Image { media_type, data } => {
+        blocks.extend(labels.drain(..).map(Block::Text));
+        let t = stitch_providers::media::image_type(media_type, data);
+        if stitch_providers::media::PROVIDER_IMAGES.contains(&t) {
+          blocks.push(Block::Image {
+            media_type: t.to_owned(),
+            data: data.clone(),
+          });
+        } else {
+          blocks.push(Block::Text(format!(
+            "[an image ({t}, {} bytes) this model cannot read]",
+            data.len()
+          )));
+        }
+      }
+      Content::Document {
+        media_type,
+        name,
+        data,
+      } if pdfs && media_type == "application/pdf" => {
+        blocks.extend(labels.drain(..).map(Block::Text));
+        blocks.push(Block::Document {
+          media_type: media_type.clone(),
+          name: name.clone(),
+          data: data.clone(),
+        });
+      }
+      c @ (Content::Document { .. } | Content::File { .. }) => {
+        blocks.extend(labels.drain(..).map(Block::Text));
+        blocks.push(Block::Text(text_of(std::slice::from_ref(c))));
+      }
+      other_content => {
+        flush_labels(&mut labels, &mut other);
+        other.push(other_content.clone());
+      }
+    }
+  }
+  flush_labels(&mut labels, &mut other);
+  (blocks, other)
 }
 
 /// What a request asks of the session.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plan {
   /// The result of the call agy waits on: answer it and stream on.
-  Answer { output: String, is_error: bool },
+  /// The blocks after its text: the images (and PDFs) it returned, each
+  /// with the line naming it.
+  Answer {
+    output: String,
+    is_error: bool,
+    attached: Vec<Block>,
+  },
   /// A new prompt in the same session.
   Prompt(Vec<Block>),
   /// A fresh session, its first prompt these blocks; why, for the log.
@@ -94,7 +193,13 @@ pub enum Plan {
 
 /// What to do with `messages`, given the fingerprints the session holds
 /// (`None`: no session) and the call agy waits on, if any.
-pub fn plan(synced: Option<&[u64]>, pending: Option<&str>, messages: &[Message]) -> Plan {
+/// `pdfs`: whether the model reads PDFs (`reads_pdfs`).
+pub fn plan(
+  synced: Option<&[u64]>,
+  pending: Option<&str>,
+  messages: &[Message],
+  pdfs: bool,
+) -> Plan {
   let fresh = |why: &str| Plan::Fresh {
     blocks: fresh_prompt(messages),
     why: why.to_owned(),
@@ -135,13 +240,42 @@ pub fn plan(synced: Option<&[u64]>, pending: Option<&str>, messages: &[Message])
       let Some((mut output, is_error)) = answer else {
         return fresh("the waiting call got no result");
       };
+      // Images a tool made for the reply (`generate_image`) are the call's
+      // message's, after the call; a tool's other images come after its
+      // result. Both go with the result.
+      let mut made = Vec::new();
+      if let Some(m) = synced.len().checked_sub(1).and_then(|i| messages.get(i)) {
+        let after = m
+          .content
+          .iter()
+          .position(|c| matches!(c, Content::ToolCall { id, .. } if id == call));
+        if let Some(i) = after {
+          made.extend(
+            m.content[i + 1..]
+              .iter()
+              .filter(|c| match c {
+                Content::Text(t) => names_media(t),
+                Content::ToolCall { .. } => false,
+                _ => true,
+              })
+              .cloned(),
+          );
+        }
+      }
+      let (mut attached, _) = split_media(&made, pdfs);
+      let (blocks, extra) = split_media(&extra, pdfs);
+      attached.extend(blocks);
       let said = text_of(&extra);
       if !said.trim().is_empty() {
         output
           .push_str("\n\n[Not part of the tool's output: a message that arrived while it ran.]\n");
         output.push_str(said.trim());
       }
-      Plan::Answer { output, is_error }
+      Plan::Answer {
+        output,
+        is_error,
+        attached,
+      }
     }
     None => {
       if rest
@@ -282,27 +416,32 @@ pub fn text_of(content: &[Content]) -> String {
   parts.join("\n\n")
 }
 
-/// The user's messages as prompt blocks: text joined, images as images.
+/// The user's messages as prompt blocks: text joined, images as images,
+/// files as notes: agy passes a prompt's embedded PDF (`resource`) to no
+/// model (checked live, 2026-11-28), where a tool result's reaches
+/// Gemini's.
 pub fn blocks_of(messages: &[Message]) -> Vec<Block> {
   let mut blocks: Vec<Block> = Vec::new();
   let mut text = Vec::new();
+  let push = |blocks: &mut Vec<Block>, text: &mut Vec<Content>, b: Block| {
+    if !text.is_empty() {
+      blocks.push(Block::Text(text_of(text)));
+      text.clear();
+    }
+    blocks.push(b);
+  };
   for m in messages {
     for c in &m.content {
       match c {
         Content::Image { media_type, data }
-          if matches!(
-            media_type.as_str(),
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-          ) =>
+          if stitch_providers::media::PROVIDER_IMAGES
+            .contains(&stitch_providers::media::image_type(media_type, data)) =>
         {
-          if !text.is_empty() {
-            blocks.push(Block::Text(text_of(&text)));
-            text.clear();
-          }
-          blocks.push(Block::Image {
-            media_type: media_type.clone(),
+          let b = Block::Image {
+            media_type: stitch_providers::media::image_type(media_type, data).to_owned(),
             data: data.clone(),
-          });
+          };
+          push(&mut blocks, &mut text, b);
         }
         other => text.push(other.clone()),
       }
@@ -352,7 +491,7 @@ mod tests {
     let synced = fingerprints(&m);
     m.push(user("next"));
     assert_eq!(
-      plan(Some(&synced), None, &m),
+      plan(Some(&synced), None, &m, true),
       Plan::Prompt(vec![Block::Text("next".into())])
     );
   }
@@ -366,8 +505,10 @@ mod tests {
     let synced = fingerprints(&m);
     m.push(Message::user(vec![result("c1", "a\nb")]));
     m.push(user("also check c"));
-    match plan(Some(&synced), Some("c1"), &m) {
-      Plan::Answer { output, is_error } => {
+    match plan(Some(&synced), Some("c1"), &m, true) {
+      Plan::Answer {
+        output, is_error, ..
+      } => {
         assert!(!is_error);
         assert!(output.starts_with("a\nb\n\n[Not part of the tool's output"));
         assert!(output.ends_with("also check c"));
@@ -377,15 +518,16 @@ mod tests {
     // Without steering, the result alone.
     let m2 = &m[..3];
     assert_eq!(
-      plan(Some(&synced), Some("c1"), m2),
+      plan(Some(&synced), Some("c1"), m2, true),
       Plan::Answer {
         output: "a\nb".into(),
-        is_error: false
+        is_error: false,
+        attached: Vec::new(),
       }
     );
     // Another call's result: a fresh session.
     assert!(matches!(
-      plan(Some(&synced), Some("c2"), m2),
+      plan(Some(&synced), Some("c2"), m2, true),
       Plan::Fresh { .. }
     ));
   }
@@ -403,7 +545,7 @@ mod tests {
     let mut r = m[..3].to_vec();
     r.push(assistant(vec![Content::Text("other".into())]));
     r.push(user("again"));
-    match plan(Some(&synced), None, &r) {
+    match plan(Some(&synced), None, &r, true) {
       Plan::Fresh { blocks, .. } => {
         let Block::Text(t) = &blocks[0] else { panic!() };
         assert!(t.contains("User:\nhi"));
@@ -416,7 +558,10 @@ mod tests {
     }
     // Compacted: a summary first.
     let c = vec![user("[summary] …"), user("go on")];
-    assert!(matches!(plan(Some(&synced), None, &c), Plan::Fresh { .. }));
+    assert!(matches!(
+      plan(Some(&synced), None, &c, true),
+      Plan::Fresh { .. }
+    ));
   }
 
   #[test]
@@ -457,5 +602,73 @@ mod tests {
     ])]);
     assert_eq!(b.len(), 2);
     assert_eq!(b[1].to_acp()["type"], "image");
+  }
+
+  #[test]
+  fn a_tools_images_and_pdfs_ride_with_its_result() {
+    let png = Content::Image {
+      media_type: "image/png".into(),
+      data: b"\x89PNG\r\n\x1a\n....".to_vec(),
+    };
+    let pdf = Content::Document {
+      media_type: "application/pdf".into(),
+      name: Some("a.pdf".into()),
+      data: b"%PDF-1.4".to_vec(),
+    };
+    let made = Content::Image {
+      media_type: "image/png".into(),
+      data: b"\x89PNG\r\n\x1a\nmade".to_vec(),
+    };
+    let mut m = vec![
+      user("look"),
+      assistant(vec![Content::Text("Looking.".into()), call("c1")]),
+    ];
+    let synced = fingerprints(&m);
+    // `generate_image`'s images, added to the call's message by the node:
+    // the turn is still the session's.
+    m[1]
+      .content
+      .push(Content::Text("[image img:1234abcd]".into()));
+    m[1].content.push(made.clone());
+    assert_eq!(fingerprints(&m), synced);
+    m.push(Message::user(vec![result("c1", "shown")]));
+    m.push(Message::user(vec![
+      Content::Text("From view_file (call c1), a.png:".into()),
+      Content::Text("[image img:5678]".into()),
+      png.clone(),
+      Content::Text("From view_file (call c1):".into()),
+      pdf.clone(),
+    ]));
+    m.push(user("and quickly"));
+    let Plan::Answer {
+      output, attached, ..
+    } = plan(Some(&synced), Some("c1"), &m, true)
+    else {
+      panic!()
+    };
+    assert!(output.starts_with("shown\n\n[Not part"));
+    assert!(output.ends_with("and quickly"));
+    let kinds: Vec<String> = attached
+      .iter()
+      .map(|b| b.to_acp()["type"].as_str().unwrap().to_owned())
+      .collect();
+    assert_eq!(
+      kinds,
+      ["text", "image", "text", "text", "image", "text", "resource"]
+    );
+    assert_eq!(attached[0], Block::Text("[image img:1234abcd]".into()));
+    let res = attached[6].to_acp();
+    assert_eq!(res["resource"]["mimeType"], "application/pdf");
+    assert_eq!(res["resource"]["uri"], "file:///a.pdf");
+    // A model that does not read PDFs: the note.
+    let Plan::Answer { attached, .. } = plan(Some(&synced), Some("c1"), &m, false) else {
+      panic!()
+    };
+    assert!(
+      matches!(&attached[6], Block::Text(t) if t.contains("cannot read")),
+      "{:?}",
+      attached[6]
+    );
+    assert!(reads_pdfs("gemini-3.8-flash") && !reads_pdfs("claude-sonnet-4-6"));
   }
 }
